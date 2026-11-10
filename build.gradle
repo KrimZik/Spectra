@@ -143,6 +143,9 @@ configurations {
 tasks.named('test', Test) {
     useJUnitPlatform()
 
+    minHeapSize = '1G'
+    maxHeapSize = '4G'
+
     jvmArgumentProviders.add(objects.newInstance(MockitoAgentProvider).tap {
         agentJar.from(configurations.mockitoAgent)
     })
