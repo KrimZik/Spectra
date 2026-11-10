@@ -26,6 +26,7 @@ public class FrequencyEngineTest {
     private MinecraftServer server;
     private ServerLevel level;
     private FrequencyEngine engine;
+    private static volatile double pooledInterferenceBenchmarkSink;
 
     @BeforeEach
     void setup() {
@@ -806,6 +807,116 @@ public class FrequencyEngineTest {
 
         secondHandle.close();
         assertEquals(0, countMatches(engine, 440.0, 0.0));
+    }
+
+    @Test
+    void pooledReceiverQueriesRemainIndependentAndMeasureAllocations() throws ReflectiveOperationException {
+        final int count = 1_024;
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+        final double range = 4.0;
+
+        record FixedEmitter(
+                Vec3 position,
+                FrequencySignal signal) implements FrequencyEmitter {
+        }
+
+        record PositionedReceiver(
+                Vec3 position,
+                double tunedFrequencyHz,
+                double toleranceHz) implements FrequencyReceiver {
+        }
+
+        Vec3 sourcePosition = new Vec3(1.0, 0.0, 0.0);
+        for (int i = 0; i < count; i++) {
+            double hz = 915_000_000.0 + i * 0.125;
+
+            engine.register(new FixedEmitter(sourcePosition, new FrequencySignal(hz, 0.25 + (i % 9) * 0.1, i * 0.031, 343.0)));
+        }
+
+        FrequencyReceiver receiverA = new PositionedReceiver(Vec3.ZERO, 915_000_064.0, 64.0);
+        FrequencyReceiver receiverB = new PositionedReceiver(new Vec3(0.0, 0.0, 1.0), 915_000_064.0, 64.0);
+        FrequencyReceiver emptyReceiver = new PositionedReceiver(Vec3.ZERO, 920_000_000.0, 0.1);
+
+        java.lang.reflect.Field poolField = FrequencyEngine.class.getDeclaredField("interferenceWorkspaces");
+        poolField.setAccessible(true);
+        java.util.Deque<?> pool = (java.util.Deque<?>) poolField.get(engine);
+
+        try (MockedStatic<FrequencySpace> ignored = mockWorldSpace(level)) {
+            FrequencyReceiver[] receivers = {
+                    receiverA,
+                    receiverB,
+                    receiverA,
+                    emptyReceiver,
+                    receiverB,
+                    receiverA
+            };
+
+            long[] ticks = {
+                    tick,
+                    tick,
+                    tick + 17,
+                    tick + 17,
+                    tick + 30,
+                    tick + 40
+            };
+
+            double[] windows = {
+                    window,
+                    window,
+                    window,
+                    window,
+                    0.25,
+                    window
+            };
+
+            Object firstWorkspace = null;
+
+            for (int i = 0; i < receivers.length; i++) {
+                FrequencyReceiver receiver = receivers[i];
+                long endTick = ticks[i];
+                double observationWindow = windows[i];
+                var reference = new FrequencyEngine.InterferenceAccumulator(endTick, observationWindow);
+
+                engine.forEachReceivedInRange(receiver, range, (emitter, signal, distanceSquared, amplitude, travelTime) -> reference.add(signal, amplitude, travelTime));
+
+                double expected = reference.meanSquareWindow(observationWindow);
+                double actual = engine.sampleInterferenceWindowMeanSquareInRange(receiver, range, endTick, observationWindow);
+
+                assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Pooled receiver mismatch at scenario " + i);
+                assertEquals(1, pool.size(), "Unexpected workspace pool size");
+
+                if (firstWorkspace == null) {
+                    firstWorkspace = pool.peekFirst();
+                    assertNotNull(firstWorkspace);
+                } else {
+                    assertSame(firstWorkspace, pool.peekFirst(), "Engine failed to reuse its accumulator");
+                }
+            }
+
+            for (int i = 0; i < 12; i++) {
+                pooledInterferenceBenchmarkSink = engine.sampleInterferenceWindowMeanSquareInRange(receiverA, range, tick + i, window);
+            }
+
+            com.sun.management.ThreadMXBean memory = java.lang.management.ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+            final int repetitions = 20;
+            long threadId = Thread.currentThread().threadId();
+            if (memory != null && !memory.isThreadAllocatedMemoryEnabled()) {
+                memory.setThreadAllocatedMemoryEnabled(true);
+            }
+
+            long beforeBytes = memory == null ? 0L : memory.getThreadAllocatedBytes(threadId);
+            long start = System.nanoTime();
+            for (int i = 0; i < repetitions; i++) {
+                pooledInterferenceBenchmarkSink = engine.sampleInterferenceWindowMeanSquareInRange(receiverA, range, tick + i, window);
+            }
+
+            long elapsed = System.nanoTime() - start;
+            double milliseconds = elapsed / (repetitions * 1_000_000.0);
+            double bytesPerQuery = memory == null ? Double.NaN : (memory.getThreadAllocatedBytes(threadId) - beforeBytes) / (double) repetitions;
+
+            System.out.printf(java.util.Locale.ROOT, "[FREQ-ENGINE-POOL] " + "carriers=%d " + "time=%.3f ms/query " + "allocated=%.1f bytes/query " + "workspaceReuse=PASS " + "receiverIsolation=PASS%n", count, milliseconds, bytesPerQuery);
+        }
     }
 
     private static MockedStatic<FrequencySpace> mockWorldSpace(ServerLevel level) {
