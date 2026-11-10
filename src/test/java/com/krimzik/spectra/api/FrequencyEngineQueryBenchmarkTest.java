@@ -42,32 +42,6 @@ class FrequencyEngineQueryBenchmarkTest {
     private record Fixture(ServerLevel level, FrequencyEngine engine, Receiver receiver, Emitter[] emitters, int expectedMatches) {}
 
     @Test
-    @org.junit.jupiter.api.Disabled("Mockito ServerLevel mock causes excessive benchmark memory usage")
-    void profileReceiverQueryStages() {
-        MinecraftServer server = mock(MinecraftServer.class);
-        ServerLevel level = mock(ServerLevel.class);
-        when(level.getServer()).thenReturn(server);
-        when(server.isSameThread()).thenReturn(true);
-
-        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
-            space.when(() -> FrequencySpace.worldPosition(eq(level), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
-
-            for (int count : new int[]{10, 100, 1_000}) {
-                for (Scenario scenario : Scenario.values()) {
-                    Fixture fixture = createFixture(level, count, scenario);
-                    assertEquals(fixture.expectedMatches(), evaluate(fixture, Stage.LOOKUP), 0.0);
-                    assertEquals(fixture.expectedMatches(), evaluate(fixture, Stage.SPATIAL), 0.0);
-
-                    for (Stage stage : Stage.values()) {
-                        benchmark(fixture, scenario, stage);
-                    }
-                    fixture.engine().shutdown();
-                }
-            }
-        }
-    }
-
-    @Test
     void receiverProjectionHappensOncePerRangeQuery() {
         MinecraftServer server = mock(MinecraftServer.class);
         ServerLevel level = mock(ServerLevel.class);
