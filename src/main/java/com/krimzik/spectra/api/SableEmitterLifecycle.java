@@ -87,8 +87,8 @@ final class SableEmitterLifecycle {
         Objects.requireNonNull(engine);
         Objects.requireNonNull(snapshots);
 
-        snapshots.keySet().removeIf(id -> !engine.hasReceiverSublevel(id));
-        engine.forEachReceiverSublevelId(id -> {
+        snapshots.keySet().removeIf(id -> !engine.hasTrackedReceiverSublevel(id));
+        engine.forEachTrackedReceiverSublevelId(id -> {
             SubLevel ship = container.getSubLevel(id);
 
             if (ship == null || ship.isRemoved()) {

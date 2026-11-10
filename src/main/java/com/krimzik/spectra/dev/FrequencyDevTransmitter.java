@@ -45,6 +45,10 @@ public final class FrequencyDevTransmitter {
 
     private FrequencyDevTransmitter() {}
 
+    static boolean isDevTransmitter(BlockEntity candidate) {
+        return candidate instanceof TestBlockEntity;
+    }
+
     public static void register(IEventBus modBus) {
         BLOCKS.register(modBus);
         BLOCK_ENTITIES.register(modBus);

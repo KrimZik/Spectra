@@ -189,6 +189,10 @@ dependencies {
         transitive = false
     }
 
+    localRuntime("maven.modrinth:l6YH9Als:v5qtqRQi") {
+        transitive = false
+    }
+
     testImplementation("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") {
         exclude group: "foundry.veil"
     }

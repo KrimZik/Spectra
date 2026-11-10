@@ -14,6 +14,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
 
+import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.tick.LevelTickEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
@@ -2226,6 +2228,8 @@ public class FrequencyEngineTest {
         FrequencyRegistration sa = engine.subscribeReceiver(first);
         FrequencyRegistration sb = engine.subscribeReceiver(second);
 
+        engine.markReceiverWorldPositionDirty(first);
+        engine.markReceiverWorldPositionDirty(second);
         engine.onTrackedEntityTick(owner);
 
         assertEquals(2, engine.pendingReceiverWorldPositionRefreshCount());
@@ -2278,6 +2282,9 @@ public class FrequencyEngineTest {
 
         when(bodyA.logicalPose()).thenReturn(poseA);
         when(bodyB.logicalPose()).thenReturn(poseB);
+
+        engine.markReceiverWorldPositionDirty(receiverA);
+        engine.markReceiverWorldPositionDirty(receiverB);
 
         Map<UUID, Pose3d> snapshots = new HashMap<>();
         SableEmitterLifecycle.observeTrackedReceiverPoses(container, engine, snapshots);
@@ -2342,11 +2349,12 @@ public class FrequencyEngineTest {
 
         SubLevelContainer container = mock(SubLevelContainer.class);
         SubLevel body = mock(SubLevel.class);
-
         Pose3d pose = new Pose3d();
 
         when(container.getSubLevel(ship)).thenReturn(body);
         when(body.logicalPose()).thenReturn(pose);
+
+        engine.markReceiverWorldPositionDirty(receiver);
 
         Map<UUID, Pose3d> snapshots = new HashMap<>();
         SableEmitterLifecycle.observeTrackedReceiverPoses(container, engine, snapshots);
@@ -2369,5 +2377,351 @@ public class FrequencyEngineTest {
         assertEquals(0, engine.subscribedReceiverCount());
 
         System.out.println("manualCleanup=PASS " + "untrackedShipSkip=PASS");
+    }
+
+    @Test
+    void levelTickRefreshesNewSubscriptionsWithinBudget() {
+        FrequencyEngine managed = FrequencyApi.get(level);
+
+        final int receiverCount = 130;
+
+        try {
+            for (int i = 0; i < receiverCount; i++) {
+                TestReceiver receiver = new TestReceiver(440.0 + i, 0.0);
+
+                managed.registerReceiverChunkBound(new BlockPos(i * 2, 0, 0), receiver);
+                managed.subscribeFixedWorldReceiver(receiver);
+            }
+
+            assertEquals(receiverCount, managed.pendingReceiverWorldPositionRefreshCount());
+
+            LevelTickEvent.Post tick = new LevelTickEvent.Post(() -> true, level);
+            try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+                FrequencyApi.onLevelTickPost(tick);
+                assertEquals(2, managed.pendingReceiverWorldPositionRefreshCount());
+
+                FrequencyApi.onLevelTickPost(tick);
+                assertEquals(0, managed.pendingReceiverWorldPositionRefreshCount());
+
+                FrequencyApi.onLevelTickPost(tick);
+                assertEquals(0, managed.pendingReceiverWorldPositionRefreshCount());
+            }
+        } finally {
+            FrequencyApi.onLevelUnload(new LevelEvent.Unload(level));
+        }
+
+        assertThrows(IllegalStateException.class, managed::receiverCount);
+
+        System.out.println("initialIndexing=PASS " + "tickBudget=PASS cleanup=PASS");
+    }
+
+
+    @Test
+    void tickRefreshRetriesFailureWithoutStarvingOtherReceivers() {
+        final class UnavailableReceiver implements FrequencyReceiver {
+            boolean unavailable = true;
+
+            @Override
+            public Vec3 position() {
+                if (unavailable) {
+                    throw new IllegalStateException("Position temporarily unavailable");
+                }
+
+                return Vec3.ZERO;
+            }
+
+            @Override
+            public double tunedFrequencyHz() {
+                return 440.0;
+            }
+
+            @Override
+            public double toleranceHz() {
+                return 0.0;
+            }
+        }
+
+        UnavailableReceiver failing = new UnavailableReceiver();
+        TestReceiver healthy = new TestReceiver(880.0, 0.0);
+
+        FrequencyRegistration a = engine.registerReceiver(failing);
+        FrequencyRegistration b = engine.registerReceiver(healthy);
+
+        FrequencyRegistration sa = engine.subscribeReceiver(failing);
+        FrequencyRegistration sb = engine.subscribeReceiver(healthy);
+
+        engine.markReceiverWorldPositionDirty(failing);
+        engine.markReceiverWorldPositionDirty(healthy);
+        assertEquals(2, engine.pendingReceiverWorldPositionRefreshCount());
+
+        try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(2));
+            assertEquals(1, engine.pendingReceiverWorldPositionRefreshCount());
+
+            List<FrequencyReceiver> found = new ArrayList<>();
+
+            engine.forEachReceiverSubscribedSnapshotInRange(880.0, Vec3.ZERO, 0.0, found::add);
+            assertEquals(1, found.size());
+            assertSame(healthy, found.getFirst());
+
+            failing.unavailable = false;
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(1));
+            assertEquals(0, engine.pendingReceiverWorldPositionRefreshCount());
+            found.clear();
+
+            engine.forEachReceiverSubscribedSnapshotInRange(440.0, Vec3.ZERO, 0.0, found::add);
+            assertEquals(1, found.size());
+            assertSame(failing, found.getFirst());
+        }
+
+        sa.close();
+        sb.close();
+        a.close();
+        b.close();
+
+        assertEquals(0, engine.receiverCount());
+
+        System.out.println("failureIsolation=PASS " + "retry=PASS noStarvation=PASS");
+    }
+
+
+    @Test
+    void hybridUsesFixedSnapshotsWithoutMissingMovingReceivers() {
+        final class MovingReceiver implements FrequencyReceiver {
+            Vec3 location;
+
+            MovingReceiver(Vec3 location) {
+                this.location = location;
+            }
+
+            @Override
+            public Vec3 position() {
+                return location;
+            }
+
+            @Override
+            public double tunedFrequencyHz() {
+                return 440.0;
+            }
+
+            @Override
+            public double toleranceHz() {
+                return 0.0;
+            }
+        }
+
+        MovingReceiver fixed = new MovingReceiver(new Vec3(1, 0, 0));
+        MovingReceiver dynamic = new MovingReceiver(new Vec3(100, 0, 0));
+
+        FrequencyRegistration fixedOwner = engine.registerReceiverChunkBound(new BlockPos(1, 64, 0), fixed);
+        FrequencyRegistration dynamicOwner = engine.registerReceiver(dynamic);
+        FrequencyRegistration fixedSub = engine.subscribeFixedWorldReceiver(fixed);
+        FrequencyRegistration dynamicSub = engine.subscribeReceiver(dynamic);
+
+        List<FrequencyReceiver> found = new ArrayList<>();
+
+        try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+            engine.forEachReceiverSubscribedHybridInRange(440.0, Vec3.ZERO, 2.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(fixed, found.getFirst());
+
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(2));
+
+            found.clear();
+            space.clearInvocations();
+
+            engine.forEachReceiverSubscribedHybridInRange(440.0, Vec3.ZERO, 2.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(fixed, found.getFirst());
+
+            space.verify(() -> FrequencySpace.worldPosition(level, fixed.position()), never());
+
+            dynamic.location = new Vec3(1.5, 0, 0);
+            found.clear();
+
+            engine.forEachReceiverSubscribedHybridInRange(440.0, Vec3.ZERO, 2.0, found::add);
+
+            assertEquals(2, found.size());
+            assertTrue(found.stream().anyMatch(r -> r == fixed));
+            assertTrue(found.stream().anyMatch(r -> r == dynamic));
+
+            fixed.location = new Vec3(200, 0, 0);
+            engine.markReceiverWorldPositionDirty(fixed);
+
+            found.clear();
+            engine.forEachReceiverSubscribedHybridInRange(440.0, fixed.location, 0.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(fixed, found.getFirst());
+
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(1));
+
+            found.clear();
+            space.clearInvocations();
+
+            engine.forEachReceiverSubscribedHybridInRange(
+                    440.0, fixed.location, 0.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(fixed, found.getFirst());
+
+            space.verify(() -> FrequencySpace.worldPosition(level, fixed.position()), never());
+        }
+
+        fixedSub.close();
+        dynamicSub.close();
+        fixedOwner.close();
+        dynamicOwner.close();
+
+        assertEquals(0, engine.receiverCount());
+        assertEquals(0, engine.subscribedReceiverCount());
+
+        System.out.println("fixedFastPath=PASS " + "movingFallback=PASS " + "dirtyFallback=PASS cleanup=PASS");
+    }
+
+
+    @Test
+    void hybridRetunesFixedReceiversAndKeepsShipsLive() {
+        final class MutableReceiver implements FrequencyReceiver {
+            Vec3 location;
+            double frequency;
+
+            MutableReceiver(Vec3 location, double frequency) {
+                this.location = location;
+                this.frequency = frequency;
+            }
+
+            @Override
+            public Vec3 position() {
+                return location;
+            }
+
+            @Override
+            public double tunedFrequencyHz() {
+                return frequency;
+            }
+
+            @Override
+            public double toleranceHz() {
+                return 0.0;
+            }
+        }
+
+        MutableReceiver fixed = new MutableReceiver(new Vec3(1, 0, 0), 440.0);
+        MutableReceiver ship = new MutableReceiver(new Vec3(100, 0, 0), 440.0);
+
+        UUID shipId = UUID.randomUUID();
+        FrequencyRegistration fixedOwner = engine.registerReceiverChunkBound(new BlockPos(1, 64, 0), fixed);
+        FrequencyRegistration shipOwner = engine.registerReceiverSublevelBound(shipId, ship);
+        assertThrows(IllegalArgumentException.class, () -> engine.subscribeFixedWorldReceiver(ship));
+
+        FrequencyRegistration fixedSub = engine.subscribeFixedWorldReceiver(fixed);
+        FrequencyRegistration shipSub = engine.subscribeReceiver(ship);
+
+        try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(2));
+
+            fixed.frequency = 880.0;
+            engine.updateReceiverSubscription(fixed);
+
+            ship.location = new Vec3(1, 0, 0);
+
+            List<FrequencyReceiver> found = new ArrayList<>();
+            engine.forEachReceiverSubscribedHybridInRange(440.0, new Vec3(1, 0, 0), 0.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(ship, found.getFirst());
+
+            found.clear();
+
+            engine.forEachReceiverSubscribedHybridInRange(880.0, new Vec3(1, 0, 0), 0.0, found::add);
+
+            assertEquals(1, found.size());
+            assertSame(fixed, found.getFirst());
+
+            engine.onSublevelRemoved(shipId);
+
+            found.clear();
+            engine.forEachReceiverSubscribedHybridInRange(440.0, new Vec3(1, 0, 0), 0.0, found::add);
+
+            assertTrue(found.isEmpty());
+        }
+
+        shipSub.close();
+        shipOwner.close();
+        fixedSub.close();
+        fixedOwner.close();
+
+        assertEquals(0, engine.receiverCount());
+        assertEquals(0, engine.subscribedReceiverCount());
+
+        System.out.println("retuning=PASS " + "sableLiveFallback=PASS cleanup=PASS");
+    }
+
+
+    @Test
+    void dynamicReceiversDoNotAutomaticallyBuildSpatialSnapshots() {
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+
+        FrequencyRegistration registration = engine.registerReceiver(receiver);
+        FrequencyRegistration subscription = engine.subscribeReceiver(receiver);
+        assertEquals(0, engine.pendingReceiverWorldPositionRefreshCount());
+
+        List<FrequencyReceiver> found = new ArrayList<>();
+
+        try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+            engine.forEachReceiverSubscribedHybridInRange(440.0, Vec3.ZERO, 0.0, found::add);
+            assertEquals(1, found.size());
+            assertSame(receiver, found.getFirst());
+
+            found.clear();
+            engine.forEachReceiverSubscribedSnapshotInRange(440.0, Vec3.ZERO, 0.0, found::add);
+            assertTrue(found.isEmpty());
+
+            engine.updateReceiverWorldPosition(receiver);
+            engine.forEachReceiverSubscribedSnapshotInRange(440.0, Vec3.ZERO, 0.0, found::add);
+            assertEquals(1, found.size());
+
+            engine.markReceiverWorldPositionDirty(receiver);
+            assertEquals(1, engine.pendingReceiverWorldPositionRefreshCount());
+            assertEquals(1, engine.processDirtyReceiverWorldPositionsForTick(1));
+            assertEquals(0, engine.pendingReceiverWorldPositionRefreshCount());
+        }
+
+        subscription.close();
+        registration.close();
+
+        assertEquals(0, engine.receiverCount());
+        assertEquals(0, engine.subscribedReceiverCount());
+    }
+
+
+    @Test
+    void liveOnlyEntityReceiversSkipPositionSampling() {
+        Entity owner = mock(Entity.class);
+        when(owner.level()).thenReturn(level);
+        doReturn(new Vec3(10, 20, 30)).when(owner).position();
+
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+        FrequencyRegistration registration = engine.registerReceiverEntityBound(owner, receiver);
+        FrequencyRegistration subscription = engine.subscribeReceiver(receiver);
+        clearInvocations(owner);
+
+        engine.onTrackedEntityTick(owner);
+        verify(owner, never()).position();
+        assertEquals(0, engine.pendingReceiverWorldPositionRefreshCount());
+
+        engine.markReceiverWorldPositionDirty(receiver);
+        engine.onTrackedEntityTick(owner);
+        verify(owner, times(1)).position();
+        assertEquals(1, engine.pendingReceiverWorldPositionRefreshCount());
+
+        subscription.close();
+        registration.close();
+
+        assertEquals(0, engine.receiverCount());
+        assertEquals(0, engine.pendingReceiverWorldPositionRefreshCount());
     }
 }

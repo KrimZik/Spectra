@@ -16,12 +16,14 @@ import net.neoforged.neoforge.event.level.LevelEvent;
 import net.neoforged.neoforge.event.entity.EntityTeleportEvent;
 import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
+import net.neoforged.neoforge.event.tick.LevelTickEvent;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Objects;
 
 public final class FrequencyApi {
+    private static final int RECEIVER_SPATIAL_REFRESH_BUDGET = 128;
     private static final Map<ServerLevel, FrequencyEngine> ENGINES = new IdentityHashMap<>();
     private static final Map<MinecraftServer, FrequencyBridgeRegistry> BRIDGES = new IdentityHashMap<>();
 
@@ -34,6 +36,7 @@ public final class FrequencyApi {
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityTeleport);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityLeaveLevel);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityTickPost);
+        NeoForge.EVENT_BUS.addListener(FrequencyApi::onLevelTickPost);
     }
 
     public static FrequencyRegistration registerBlockEmitter(BlockEntity owner, FrequencyEmitter emitter) {
@@ -140,7 +143,24 @@ public final class FrequencyApi {
         }
     }
 
-    private static void onLevelUnload(LevelEvent.Unload event) {
+    static void onLevelTickPost(LevelTickEvent.Post event) {
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+
+        FrequencyEngine engine = ENGINES.get(level);
+        if (engine == null) {
+            return;
+        }
+
+        if (engine.pendingReceiverWorldPositionRefreshCount() == 0) {
+            return;
+        }
+
+        engine.processDirtyReceiverWorldPositionsForTick(RECEIVER_SPATIAL_REFRESH_BUDGET);
+    }
+
+    static void onLevelUnload(LevelEvent.Unload event) {
         if (!(event.getLevel() instanceof ServerLevel level)) return;
         FrequencyEngine engine = ENGINES.remove(level);
         if (engine != null) engine.shutdown();

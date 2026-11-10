@@ -1,6 +1,7 @@
 package com.krimzik.spectra;
 
 import com.krimzik.spectra.api.FrequencyApi;
+import com.krimzik.spectra.dev.FrequencyBlockStressDiagnostic;
 import com.krimzik.spectra.dev.FrequencyDevTransmitter;
 import com.krimzik.spectra.dev.FrequencyEmitterLifecycleDiagnostic;
 import com.krimzik.spectra.dev.FrequencyMotionDiagnostic;
@@ -20,6 +21,7 @@ public final class spectra {
             FrequencyDevTransmitter.register(modEventBus);
             FrequencyMotionDiagnostic.install();
             FrequencyEmitterLifecycleDiagnostic.install();
+            FrequencyBlockStressDiagnostic.install();
         }
     }
 }
