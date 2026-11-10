@@ -47,6 +47,9 @@ public final class FrequencyEngine {
     private final ServerLevel level;
     private boolean stopped;
     private int activeQueries;
+    private static final int MAX_POOLED_INTERFERENCE = 2;
+    private static final int MAX_POOLED_CARRIERS = 8_192;
+    private final ArrayDeque<InterferenceAccumulator> interferenceWorkspaces = new ArrayDeque<>(2);
 
     FrequencyEngine(ServerLevel level) {
         this.level = Objects.requireNonNull(level);
@@ -670,15 +673,23 @@ public final class FrequencyEngine {
             throw new IllegalArgumentException("Observation window must be finite and positive");
         }
 
-        InterferenceAccumulator accumulator = new InterferenceAccumulator(endTick, windowSeconds);
+        checkRunning();
+        InterferenceAccumulator accumulator = interferenceWorkspaces.pollFirst();
+        if (accumulator == null) {
+            accumulator = new InterferenceAccumulator(endTick, windowSeconds);
+        } else {
+            accumulator.reset(endTick, windowSeconds);
+        }
 
-        forEachReceivedInRange(
-                receiver,
-                rangeMeters,
-                (emitter, signal, distanceSquared, amplitude, travelTime) -> accumulator.add(signal, amplitude, travelTime)
-        );
-
-        return accumulator.meanSquareWindow(windowSeconds);
+        final InterferenceAccumulator workspace = accumulator;
+        try {
+            forEachReceivedInRange(receiver, rangeMeters, (emitter, signal, distanceSquared, amplitude, travelTime) -> workspace.add(signal, amplitude, travelTime));
+            return workspace.meanSquareWindow(windowSeconds);
+        } finally {
+            if (!stopped && interferenceWorkspaces.size() < MAX_POOLED_INTERFERENCE && workspace.additionalCount + 1 <= MAX_POOLED_CARRIERS) {
+                interferenceWorkspaces.addFirst(workspace);
+            }
+        }
     }
 
     /**
@@ -725,6 +736,7 @@ public final class FrequencyEngine {
 
     void shutdown() {
         stopped = true;
+        interferenceWorkspaces.clear();
         emitters.clear();
         byFrequency.clear();
         emitterMotionSamples.clear();
@@ -821,8 +833,8 @@ public final class FrequencyEngine {
     }
 
     static final class InterferenceAccumulator {
-        private final long endTick;
-        private final double halfWindowSeconds;
+        private long endTick;
+        private double halfWindowSeconds;
 
         InterferenceAccumulator() {
             this(0L, 0.0);
@@ -833,6 +845,23 @@ public final class FrequencyEngine {
             this.halfWindowSeconds = windowSeconds * 0.5;
         }
 
+        void reset(long endTick, double windowSeconds) {
+            this.endTick = endTick;
+            this.halfWindowSeconds = windowSeconds * 0.5;
+
+            primaryFrequency = Double.NaN;
+            primaryReal = 0.0;
+            primaryImaginary = 0.0;
+            primaryWindowPhaseShift = 0.0;
+            additionalCount = 0;
+
+            if (additionalIndices != null) {
+                additionalIndices.clear();
+            }
+
+            invalidateDualTreeGeometry();
+        }
+
         private double primaryFrequency = Double.NaN;
         private double primaryReal;
         private double primaryImaginary;
@@ -840,16 +869,57 @@ public final class FrequencyEngine {
         private Double2IntOpenHashMap additionalIndices;
         private double[] additionalCarriers;
         private int additionalCount;
+        private SortedCarriers cachedDualCarriers;
+        private FiniteWindowDualTree cachedDualTree;
+        private int[] cachedDualOffsets;
+
+        private boolean cachedDualGeometryDirty = true;
+        private boolean cachedDualValuesDirty = true;
+
+        private void invalidateDualTreeGeometry() {
+            cachedDualGeometryDirty = true;
+            cachedDualValuesDirty = true;
+        }
+
+        private boolean refreshCachedDualOffsets() {
+            if (cachedDualCarriers == null || cachedDualTree == null || cachedDualOffsets == null || cachedDualOffsets.length != additionalCount + 1) {
+                return false;
+            }
+
+            double[] frequencies = cachedDualCarriers.frequencies();
+            for (int i = 0; i < frequencies.length; i++) {
+                double hz = frequencies[i];
+                if (hz == primaryFrequency) {
+                    cachedDualOffsets[i] = -1;
+                    continue;
+                }
+
+                if (additionalIndices == null) {
+                    return false;
+                }
+
+                int offset = additionalIndices.get(hz);
+                if (offset < 0) {
+                    return false;
+                }
+
+                cachedDualOffsets[i] = offset;
+            }
+
+            return true;
+        }
 
         void add(FrequencySignal signal, double receivedAmplitude, double travelTimeSeconds) {
             if (receivedAmplitude == 0.0) {
                 return;
             }
 
+            cachedDualValuesDirty = true;
             double frequency = signal.frequencyHz();
 
             if (Double.isNaN(primaryFrequency)) {
                 primaryFrequency = frequency;
+                invalidateDualTreeGeometry();
 
                 if (halfWindowSeconds > 0.0) {
                     primaryWindowPhaseShift = FrequencyMath.phaseAdvanceRadians(frequency, halfWindowSeconds);
@@ -878,10 +948,13 @@ public final class FrequencyEngine {
                     }
 
                     additionalCarriers[index] = frequency;
+                    additionalCarriers[index + 1] = 0.0;
+                    additionalCarriers[index + 2] = 0.0;
                     additionalCarriers[index + 3] = halfWindowSeconds > 0.0 ? FrequencyMath.phaseAdvanceRadians(frequency, halfWindowSeconds) : 0.0;
 
                     additionalIndices.put(frequency, index);
                     additionalCount++;
+                    invalidateDualTreeGeometry();
                 }
 
                 windowPhaseShift = additionalCarriers[index + 3];
@@ -903,6 +976,119 @@ public final class FrequencyEngine {
 
             additionalCarriers[index + 1] += real;
             additionalCarriers[index + 2] += imaginary;
+        }
+
+        record SortedCarriers(
+                double[] frequencies,
+                double[] real,
+                double[] imaginary) {
+        }
+
+        SortedCarriers sortedCarriers() {
+            if (Double.isNaN(primaryFrequency)) {
+                return new SortedCarriers(new double[0], new double[0], new double[0]);
+            }
+
+            int count = additionalCount + 1;
+            double[] frequencies = new double[count];
+            double[] real = new double[count];
+            double[] imaginary = new double[count];
+
+            frequencies[0] = primaryFrequency;
+            for (int i = 0; i < additionalCount; i++) {
+                frequencies[i + 1] = additionalCarriers[i * 4];
+            }
+
+            Arrays.sort(frequencies);
+            for (int i = 0; i < count; i++) {
+                double hz = frequencies[i];
+                if (hz == primaryFrequency) {
+                    real[i] = primaryReal;
+                    imaginary[i] = primaryImaginary;
+                    continue;
+                }
+
+                int offset = additionalIndices.get(hz);
+                if (offset < 0) {
+                    throw new IllegalStateException("Missing frequency during carrier sorting");
+                }
+
+                real[i] = additionalCarriers[offset + 1];
+                imaginary[i] = additionalCarriers[offset + 2];
+            }
+
+            return new SortedCarriers(frequencies, real, imaginary);
+        }
+
+        double meanSquareWindowDualTreeProbe(double windowSeconds) {
+            if (!(windowSeconds > 0.0) || !Double.isFinite(windowSeconds)) {
+                throw new IllegalArgumentException("Invalid observation window");
+            }
+
+            if (Double.doubleToLongBits(windowSeconds * 0.5) != Double.doubleToLongBits(halfWindowSeconds)) {
+                throw new IllegalArgumentException("Observation window differs from accumulation window");
+            }
+
+            if (Double.isNaN(primaryFrequency)) {
+                return 0.0;
+            }
+
+            if (additionalCount == 0) {
+                return windowSelf(primaryFrequency, primaryReal, primaryImaginary, windowSeconds);
+            }
+
+            if (cachedDualTree == null || cachedDualGeometryDirty) {
+                if (refreshCachedDualOffsets()) {
+                    cachedDualValuesDirty = true;
+                } else {
+                    SortedCarriers carriers = sortedCarriers();
+                    double[] frequencies = carriers.frequencies();
+
+                    int[] offsets = new int[frequencies.length];
+                    for (int i = 0; i < frequencies.length; i++) {
+                        double hz = frequencies[i];
+                        if (hz == primaryFrequency) {
+                            offsets[i] = -1;
+                        } else {
+                            int offset = additionalIndices.get(hz);
+                            if (offset < 0) {
+                                throw new IllegalStateException("Missing carrier frequency");
+                            }
+
+                            offsets[i] = offset;
+                        }
+                    }
+
+                    cachedDualCarriers = carriers;
+                    cachedDualOffsets = offsets;
+                    cachedDualTree = new FiniteWindowDualTree(frequencies);
+
+                    cachedDualValuesDirty = false;
+                }
+
+                cachedDualGeometryDirty = false;
+            }
+
+            if (cachedDualValuesDirty) {
+                double[] real = cachedDualCarriers.real();
+                double[] imaginary = cachedDualCarriers.imaginary();
+
+                for (int i = 0; i < cachedDualOffsets.length; i++) {
+                    int offset = cachedDualOffsets[i];
+
+                    if (offset == -1) {
+                        real[i] = primaryReal;
+                        imaginary[i] = primaryImaginary;
+                    } else {
+                        real[i] = additionalCarriers[offset + 1];
+                        imaginary[i] = additionalCarriers[offset + 2];
+                    }
+                }
+
+                cachedDualValuesDirty = false;
+            }
+
+            return cachedDualTree.meanSquare(cachedDualCarriers.real(), cachedDualCarriers.imaginary(), windowSeconds);
         }
 
         private double meanSquare() {
@@ -939,6 +1125,10 @@ public final class FrequencyEngine {
                     double orderedStep = ordered.additionalCarriers[0] - ordered.primaryFrequency;
                     return ordered.meanSquareIntegerFrequencyGrid(windowSeconds, orderedStep);
                 }
+            }
+
+            if (additionalCount >= 1_023 && windowSeconds > 0.0 && Double.isFinite(windowSeconds) && Double.doubleToLongBits(windowSeconds * 0.5) == Double.doubleToLongBits(halfWindowSeconds)) {
+                return meanSquareWindowDualTreeProbe(windowSeconds);
             }
 
             double total = windowSelf(primaryFrequency, primaryReal, primaryImaginary, windowSeconds);
