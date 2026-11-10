@@ -6,19 +6,9 @@ import com.krimzik.spectra.api.motion.FrequencyMotionSnapshot;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
-public interface FrequencyEmitter {
-    Vec3 position();
+public interface FrequencyEmitter extends FrequencyEndpoint {
     FrequencySignal signal();
-
     default boolean isEmitting() {
         return true;
-    }
-
-    default Vec3 additionalWorldVelocityMetersPerSecond() {
-        return Vec3.ZERO;
-    }
-
-    default FrequencyMotionSnapshot motionSnapshot(ServerLevel level) {
-        return FrequencyMotion.capture(level, position(), additionalWorldVelocityMetersPerSecond());
     }
 }

@@ -916,6 +916,50 @@ public class FrequencyEngineTest {
             double bytesPerQuery = memory == null ? Double.NaN : (memory.getThreadAllocatedBytes(threadId) - beforeBytes) / (double) repetitions;
 
             System.out.printf(java.util.Locale.ROOT, "[FREQ-ENGINE-POOL] " + "carriers=%d " + "time=%.3f ms/query " + "allocated=%.1f bytes/query " + "workspaceReuse=PASS " + "receiverIsolation=PASS%n", count, milliseconds, bytesPerQuery);
+            com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer noOpReception = (emitter, signal, distanceSquared, amplitude, travelTime) -> {};
+
+            for (int warmup = 0; warmup < 8; warmup++) {
+                FrequencySpace.worldPosition(level, receiverA.position());
+                for (int j = 0; j < count; j++) {
+                    FrequencySpace.worldPosition(level, sourcePosition);
+                }
+
+                engine.forEachReceivedInRange(receiverA, range, noOpReception);
+            }
+
+            long mockBeforeBytes = memory == null ? 0L : memory.getThreadAllocatedBytes(threadId);
+            long mockStart = System.nanoTime();
+            double coordinateChecksum = 0.0;
+
+            for (int iteration = 0;
+                 iteration < repetitions; iteration++) {
+                Vec3 receiverWorld = FrequencySpace.worldPosition(level, receiverA.position());
+                coordinateChecksum += receiverWorld.x;
+
+                for (int j = 0; j < count; j++) {
+                    Vec3 transmitterWorld = FrequencySpace.worldPosition(level, sourcePosition);
+                    coordinateChecksum += transmitterWorld.x;
+                }
+            }
+
+            long mockElapsed = System.nanoTime() - mockStart;
+            pooledInterferenceBenchmarkSink = coordinateChecksum;
+            double mockMs = mockElapsed / (repetitions * 1_000_000.0);
+            double mockBytes = memory == null ? Double.NaN : (memory.getThreadAllocatedBytes(threadId) - mockBeforeBytes) / (double) repetitions;
+
+            long traversalBeforeBytes = memory == null ? 0L : memory.getThreadAllocatedBytes(threadId);
+            long traversalStart = System.nanoTime();
+
+            for (int iteration = 0;
+                 iteration < repetitions; iteration++) {
+                engine.forEachReceivedInRange(receiverA, range, noOpReception);
+            }
+
+            long traversalElapsed = System.nanoTime() - traversalStart;
+            double traversalMs = traversalElapsed / (repetitions * 1_000_000.0);
+            double traversalBytes = memory == null ? Double.NaN : (memory.getThreadAllocatedBytes(threadId) - traversalBeforeBytes) / (double) repetitions;
+
+            System.out.printf(java.util.Locale.ROOT, "[FREQ-BREAKDOWN] " + "carriers=%d " + "mockOnly=%.3f ms %.0f bytes " + "traversal=%.3f ms %.0f bytes " + "full=%.3f ms %.0f bytes%n", count, mockMs, mockBytes, traversalMs, traversalBytes, milliseconds, bytesPerQuery);
         }
     }
 
@@ -935,4 +979,137 @@ public class FrequencyEngineTest {
 
         engine.register(emitter);
     }
+
+    @Test
+    void transmitterAndReceiverRegistrationsRemainIndependent() {
+        TestEmitter transmitter = new TestEmitter(440.0);
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+
+        assertEquals(0, engine.emitterCount());
+        assertEquals(0, engine.receiverCount());
+
+        FrequencyRegistration tx = engine.register(transmitter);
+
+        assertEquals(1, engine.emitterCount());
+        assertEquals(0, engine.receiverCount());
+
+        FrequencyRegistration rx = engine.registerReceiver(receiver);
+
+        assertEquals(1, engine.emitterCount());
+        assertEquals(1, engine.receiverCount());
+
+        tx.close();
+        assertEquals(0, engine.emitterCount());
+        assertEquals(1, engine.receiverCount());
+
+        rx.close();
+        assertEquals(0, engine.emitterCount());
+        assertEquals(0, engine.receiverCount());
+
+        tx.close();
+        rx.close();
+
+        FrequencyRegistration newTx = engine.register(new TestEmitter(440.0));
+        assertEquals(1, countMatches(engine, 440.0, 0.0));
+        assertEquals(0, engine.receiverCount());
+
+        newTx.close();
+
+        System.out.println("independentRegistration=PASS");
+    }
+
+
+    @Test
+    void receiverRegistrationUsesObjectIdentity() {
+        TestReceiver first = new TestReceiver(440.0, 0.0);
+        TestReceiver second = new TestReceiver(440.0, 0.0);
+
+        assertEquals(first, second);
+        assertNotSame(first, second);
+
+        FrequencyRegistration a = engine.registerReceiver(first);
+        FrequencyRegistration b = engine.registerReceiver(second);
+
+        assertEquals(2, engine.receiverCount());
+        assertEquals(0, engine.emitterCount());
+
+        assertThrows(IllegalStateException.class, () -> engine.registerReceiver(first));
+
+        a.close();
+        assertEquals(1, engine.receiverCount());
+
+        b.close();
+        assertEquals(0, engine.receiverCount());
+
+        System.out.println("receiverIdentity=PASS");
+    }
+
+
+    @Test
+    void transceiverSupportsIndependentTxAndRxLifecycles() {
+        final class TestTransceiver implements FrequencyEmitter, FrequencyReceiver {
+            private final FrequencySignal transmitted = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+            private boolean transmitting = true;
+
+            @Override
+            public Vec3 position() {
+                return Vec3.ZERO;
+            }
+
+            @Override
+            public FrequencySignal signal() {
+                return transmitted;
+            }
+
+            @Override
+            public boolean isEmitting() {
+                return transmitting;
+            }
+
+            @Override
+            public double tunedFrequencyHz() {
+                return 440.0;
+            }
+
+            @Override
+            public double toleranceHz() {
+                return 0.0;
+            }
+        }
+
+        TestTransceiver device = new TestTransceiver();
+
+        FrequencyRegistration tx = engine.register(device);
+        FrequencyRegistration rx = engine.registerReceiver(device);
+
+        assertEquals(1, engine.emitterCount());
+        assertEquals(1, engine.receiverCount());
+        assertEquals(1, countMatches(engine, 440.0, 0.0));
+
+        device.transmitting = false;
+        assertEquals(0, countMatches(engine, 440.0, 0.0));
+        assertEquals(1, engine.receiverCount());
+
+        device.transmitting = true;
+        assertEquals(1, countMatches(engine, 440.0, 0.0));
+
+        rx.close();
+        assertEquals(1, engine.emitterCount());
+        assertEquals(0, engine.receiverCount());
+        assertEquals(1, countMatches(engine, 440.0, 0.0));
+
+        FrequencyRegistration secondRx = engine.registerReceiver(device);
+        assertEquals(1, engine.receiverCount());
+
+        tx.close();
+        assertEquals(0, engine.emitterCount());
+        assertEquals(1, engine.receiverCount());
+        assertEquals(0, countMatches(engine, 440.0, 0.0));
+
+        secondRx.close();
+        assertEquals(0, engine.receiverCount());
+
+        System.out.println("transceiverIndependence=PASS");
+    }
+
 }

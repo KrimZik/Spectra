@@ -24,6 +24,7 @@ import java.util.function.Function;
 
 public final class FrequencyEngine {
     private final IdentityHashMap<FrequencyEmitter, Double> emitters = new IdentityHashMap<>();
+    private final IdentityHashMap<FrequencyReceiver, ReceiverRegistration> receivers = new IdentityHashMap<>();
     private final NavigableMap<Double, FrequencyBucket> byFrequency = new TreeMap<>();
     private final IdentityHashMap<FrequencyEmitter, EmitterMotionSample> emitterMotionSamples = new IdentityHashMap<>();
     private final Map<Long, Set<EmitterRegistration>> chunkRegistrations = new HashMap<>();
@@ -84,7 +85,6 @@ public final class FrequencyEngine {
                 }
 
                 emitterMotionSamples.remove(emitter);
-
                 if (ownerChunk != null) {
                     Set<EmitterRegistration> bucket = chunkRegistrations.get(ownerChunk);
                     if (bucket != null) {
@@ -112,8 +112,45 @@ public final class FrequencyEngine {
         }
     }
 
+    private final class ReceiverRegistration implements FrequencyRegistration {
+        private final FrequencyReceiver receiver;
+        private boolean removed;
+
+        private ReceiverRegistration(FrequencyReceiver receiver) {
+            this.receiver = receiver;
+        }
+
+        @Override
+        public void close() {
+            if (removed) {
+                return;
+            }
+
+            if (!stopped) {
+                checkWritable();
+                receivers.remove(receiver);
+            }
+
+            removed = true;
+        }
+    }
+
     public FrequencyRegistration register(FrequencyEmitter emitter) {
         return registerInternal(emitter, null, null);
+    }
+
+    public FrequencyRegistration registerReceiver(FrequencyReceiver receiver) {
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        if (receivers.containsKey(receiver)) {
+            throw new IllegalStateException("Receiver already registered");
+        }
+
+        ReceiverRegistration registration = new ReceiverRegistration(receiver);
+        receivers.put(receiver, registration);
+
+        return registration;
     }
 
     public FrequencyRegistration registerChunkBound(BlockPos ownerPos, FrequencyEmitter emitter) {
@@ -734,10 +771,16 @@ public final class FrequencyEngine {
         return emitters.size();
     }
 
+    public int receiverCount() {
+        checkRunning();
+        return receivers.size();
+    }
+
     void shutdown() {
         stopped = true;
         interferenceWorkspaces.clear();
         emitters.clear();
+        receivers.clear();
         byFrequency.clear();
         emitterMotionSamples.clear();
         chunkRegistrations.clear();
@@ -869,6 +912,7 @@ public final class FrequencyEngine {
         private Double2IntOpenHashMap additionalIndices;
         private double[] additionalCarriers;
         private int additionalCount;
+        private double[] exactTrigScratch;
         private SortedCarriers cachedDualCarriers;
         private FiniteWindowDualTree cachedDualTree;
         private int[] cachedDualOffsets;
@@ -1062,7 +1106,6 @@ public final class FrequencyEngine {
                     cachedDualCarriers = carriers;
                     cachedDualOffsets = offsets;
                     cachedDualTree = new FiniteWindowDualTree(frequencies);
-
                     cachedDualValuesDirty = false;
                 }
 
@@ -1138,8 +1181,12 @@ public final class FrequencyEngine {
                 double halfWindow = windowSeconds * 0.5;
                 boolean reusePhase = halfWindow == halfWindowSeconds;
 
-                double[] trig = new double[additionalCount * 2];
+                int requiredTrigLength = additionalCount * 2;
+                if (exactTrigScratch == null || exactTrigScratch.length < requiredTrigLength) {
+                    exactTrigScratch = new double[requiredTrigLength];
+                }
 
+                double[] trig = exactTrigScratch;
                 for (int src = 0; src < limit; src += 4) {
                     double hz = additionalCarriers[src];
                     double real = additionalCarriers[src + 1];
@@ -1276,7 +1323,6 @@ public final class FrequencyEngine {
             }
 
             occupied[index] = true;
-
             int offset = (index == 0 ? occupied.length - 1 : index - 1) * 4;
             data[offset] = frequency;
             data[offset + 1] = real;
@@ -1303,7 +1349,6 @@ public final class FrequencyEngine {
             double total = 0.0;
             for (int i = 0; i < count; i++) {
                 int offset = (i - 1) * 4;
-
                 double real = i == 0 ? primaryReal : additionalCarriers[offset + 1];
                 double imaginary = i == 0 ? primaryImaginary : additionalCarriers[offset + 2];
 
@@ -1315,7 +1360,6 @@ public final class FrequencyEngine {
 
             for (int i = 0; i < count; i++) {
                 int offsetA = (i - 1) * 4;
-
                 double realA = i == 0 ? primaryReal : additionalCarriers[offsetA + 1];
                 double imaginaryA = i == 0 ? primaryImaginary : additionalCarriers[offsetA + 2];
 
@@ -1369,7 +1413,6 @@ public final class FrequencyEngine {
             double cosAsinB = cosA * sinB;
 
             double differenceSinc;
-
             if (Math.abs(xDifference) <= Math.PI * 0.25) {
                 differenceSinc = sincWindow(differenceHz, windowSeconds);
             } else if (!Double.isFinite(xDifference)) {
@@ -1379,7 +1422,6 @@ public final class FrequencyEngine {
             }
 
             double sumSinc;
-
             if (Math.abs(xSum) <= Math.PI * 0.25) {
                 sumSinc = sincWindow(sumHz, windowSeconds);
             } else if (!Double.isFinite(xSum)) {
@@ -1397,7 +1439,6 @@ public final class FrequencyEngine {
         private static double windowSelf(double frequency, double real, double imaginary, double windowSeconds) {
             double realSquared = real * real;
             double imaginarySquared = imaginary * imaginary;
-
             return 0.5 * (realSquared + imaginarySquared - (realSquared - imaginarySquared) * sincWindow(2.0 * frequency, windowSeconds));
         }
 
@@ -1417,7 +1458,6 @@ public final class FrequencyEngine {
             }
 
             double x = Math.PI * frequency * windowSeconds;
-
             if (!Double.isFinite(x)) {
                 return 0.0;
             }
@@ -1428,7 +1468,6 @@ public final class FrequencyEngine {
             }
 
             double phase = FrequencyMath.phaseAdvanceRadians(frequency, windowSeconds * 0.5);
-
             return Math.sin(phase) / x;
         }
     }

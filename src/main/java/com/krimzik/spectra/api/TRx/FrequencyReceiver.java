@@ -5,16 +5,7 @@ import com.krimzik.spectra.api.motion.FrequencyMotionSnapshot;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
-public interface FrequencyReceiver {
-    Vec3 position();
+public interface FrequencyReceiver extends FrequencyEndpoint {
     double tunedFrequencyHz();
     double toleranceHz();
-
-    default Vec3 additionalWorldVelocityMetersPerSecond() {
-        return Vec3.ZERO;
-    }
-
-    default FrequencyMotionSnapshot motionSnapshot(ServerLevel level) {
-        return FrequencyMotion.capture(level, position(), additionalWorldVelocityMetersPerSecond());
-    }
 }
