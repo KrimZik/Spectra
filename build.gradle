@@ -186,6 +186,10 @@ dependencies {
         transitive = false
     }
 
+    testImplementation("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") {
+        exclude group: "foundry.veil"
+    }
+
     testImplementation 'org.mockito:mockito-core:5.18.0'
     mockitoAgent('org.mockito:mockito-core:5.18.0') {
         transitive = false

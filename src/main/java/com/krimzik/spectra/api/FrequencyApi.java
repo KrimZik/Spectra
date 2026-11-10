@@ -1,6 +1,7 @@
 package com.krimzik.spectra.api;
 
 import com.krimzik.spectra.api.TRx.FrequencyEmitter;
+import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.motion.FrequencyMotion;
 import com.krimzik.spectra.api.registration.FrequencyRegistration;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -14,6 +15,7 @@ import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import net.neoforged.neoforge.event.entity.EntityTeleportEvent;
 import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
@@ -31,6 +33,7 @@ public final class FrequencyApi {
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onServerStopped);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityTeleport);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityLeaveLevel);
+        NeoForge.EVENT_BUS.addListener(FrequencyApi::onEntityTickPost);
     }
 
     public static FrequencyRegistration registerBlockEmitter(BlockEntity owner, FrequencyEmitter emitter) {
@@ -63,6 +66,40 @@ public final class FrequencyApi {
 
         if (!(owner.level() instanceof ServerLevel level)) throw new IllegalArgumentException("Emitter owner must belong to a server level");
         return get(level).registerEntityBound(owner, emitter);
+    }
+
+    public static FrequencyRegistration registerEntityReceiver(Entity owner, FrequencyReceiver receiver) {
+        Objects.requireNonNull(owner);
+        Objects.requireNonNull(receiver);
+
+        if (!(owner.level() instanceof ServerLevel level)) {
+            throw new IllegalArgumentException("Receiver owner must belong to a server level");
+        }
+
+        return get(level).registerReceiverEntityBound(owner, receiver);
+    }
+
+    public static FrequencyRegistration registerBlockReceiver(BlockEntity owner, FrequencyReceiver receiver) {
+        Objects.requireNonNull(owner);
+        Objects.requireNonNull(receiver);
+
+        if (!(owner.getLevel() instanceof ServerLevel level)) {
+            throw new IllegalArgumentException("Receiver owner must belong to a server level");
+        }
+
+        if (owner.isRemoved()) {
+            throw new IllegalStateException("Cannot register a removed block entity");
+        }
+
+        FrequencyEngine engine = get(level);
+        if (ModList.get().isLoaded("sable")) {
+            FrequencyRegistration shipRegistration = SableEmitterLifecycle.registerReceiverIfShip(level, owner.getBlockPos(), receiver, engine);
+            if (shipRegistration != null) {
+                return shipRegistration;
+            }
+        }
+
+        return engine.registerReceiverChunkBound(owner.getBlockPos(), receiver);
     }
 
     public static FrequencyEngine get(ServerLevel level) {
@@ -131,10 +168,25 @@ public final class FrequencyApi {
 
     private static void onEntityTeleport(EntityTeleportEvent event) {
         Entity entity = event.getEntity();
-
-        if (!event.isCanceled()
-                && entity.level() instanceof ServerLevel) {
+        if (!event.isCanceled() && entity.level() instanceof ServerLevel) {
             FrequencyMotion.markTeleported(entity);
+
+            FrequencyEngine engine = ENGINES.get((ServerLevel) entity.level());
+            if (engine != null) {
+                engine.onEntityPositionChanged(entity);
+            }
+        }
+    }
+
+    private static void onEntityTickPost(EntityTickEvent.Post event) {
+        Entity entity = event.getEntity();
+        if (!(entity.level() instanceof ServerLevel level)) {
+            return;
+        }
+
+        FrequencyEngine engine = ENGINES.get(level);
+        if (engine != null) {
+            engine.onTrackedEntityTick(entity);
         }
     }
 

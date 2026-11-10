@@ -25,13 +25,27 @@ import java.util.function.Function;
 public final class FrequencyEngine {
     private final IdentityHashMap<FrequencyEmitter, Double> emitters = new IdentityHashMap<>();
     private final IdentityHashMap<FrequencyReceiver, ReceiverRegistration> receivers = new IdentityHashMap<>();
+    private int subscribedReceiverCount;
+    private final ReceiverSubscriptionIndex receiverSubscriptionIndex = new ReceiverSubscriptionIndex();
+    private final FrequencySpatialIndex<FrequencyReceiver> receiverSpatialIndex = new FrequencySpatialIndex<>();
+    private final LinkedHashSet<ReceiverRegistration> pendingReceiverSpatialRefreshes = new LinkedHashSet<>();
     private final NavigableMap<Double, FrequencyBucket> byFrequency = new TreeMap<>();
     private final IdentityHashMap<FrequencyEmitter, EmitterMotionSample> emitterMotionSamples = new IdentityHashMap<>();
-    private final Map<Long, Set<EmitterRegistration>> chunkRegistrations = new HashMap<>();
-    private final Map<Entity, Set<EmitterRegistration>> entityRegistrations = new IdentityHashMap<>();
+    private final Map<Long, Set<FrequencyRegistration>> chunkRegistrations = new HashMap<>();
+    private final Map<Entity, Set<FrequencyRegistration>> entityRegistrations = new IdentityHashMap<>();
+    private final IdentityHashMap<Entity, ReceiverOwnerPosition> receiverOwnerPositions = new IdentityHashMap<>();
     private final Map<UUID, Set<FrequencyRegistration>> sublevelRegistrations = new HashMap<>();
+    private final Map<UUID, Set<ReceiverRegistration>> sublevelReceiverRegistrations = new HashMap<>();
 
     boolean sableObserverAttached;
+
+    private static final class ReceiverOwnerPosition {
+        int receiverCount;
+        boolean initialized;
+        double x;
+        double y;
+        double z;
+    }
 
     private static final class EmitterMotionSample {
         final FrequencyAccelerationTracker tracker = new FrequencyAccelerationTracker();
@@ -62,11 +76,7 @@ public final class FrequencyEngine {
         private final Entity ownerEntity;
         private boolean removed;
 
-        private EmitterRegistration(
-                FrequencyEmitter emitter,
-                Long ownerChunk,
-                Entity ownerEntity) {
-
+        private EmitterRegistration(FrequencyEmitter emitter, Long ownerChunk, Entity ownerEntity) {
             this.emitter = emitter;
             this.ownerChunk = ownerChunk;
             this.ownerEntity = ownerEntity;
@@ -86,7 +96,7 @@ public final class FrequencyEngine {
 
                 emitterMotionSamples.remove(emitter);
                 if (ownerChunk != null) {
-                    Set<EmitterRegistration> bucket = chunkRegistrations.get(ownerChunk);
+                    Set<FrequencyRegistration> bucket = chunkRegistrations.get(ownerChunk);
                     if (bucket != null) {
                         bucket.remove(this);
 
@@ -97,7 +107,7 @@ public final class FrequencyEngine {
                 }
 
                 if (ownerEntity != null) {
-                    Set<EmitterRegistration> bucket = entityRegistrations.get(ownerEntity);
+                    Set<FrequencyRegistration> bucket = entityRegistrations.get(ownerEntity);
                     if (bucket != null) {
                         bucket.remove(this);
 
@@ -114,10 +124,19 @@ public final class FrequencyEngine {
 
     private final class ReceiverRegistration implements FrequencyRegistration {
         private final FrequencyReceiver receiver;
+        private boolean subscribed;
+        private double subscribedMinHz;
+        private double subscribedMaxHz;
+        private ReceiverSubscriptionIndex.Entry subscriptionEntry;
+        private boolean hasWorldPositionSample;
+        private final Long ownerChunk;
+        private final Entity ownerEntity;
         private boolean removed;
 
-        private ReceiverRegistration(FrequencyReceiver receiver) {
+        private ReceiverRegistration(FrequencyReceiver receiver, Long ownerChunk, Entity ownerEntity) {
             this.receiver = receiver;
+            this.ownerChunk = ownerChunk;
+            this.ownerEntity = ownerEntity;
         }
 
         @Override
@@ -128,10 +147,59 @@ public final class FrequencyEngine {
 
             if (!stopped) {
                 checkWritable();
+
+                unsubscribe();
                 receivers.remove(receiver);
+
+                if (ownerChunk != null) {
+                    Set<FrequencyRegistration> bucket = chunkRegistrations.get(ownerChunk);
+                    if (bucket != null) {
+                        bucket.remove(this);
+                        if (bucket.isEmpty()) {
+                            chunkRegistrations.remove(ownerChunk);
+                        }
+                    }
+                }
+
+                if (ownerEntity != null) {
+                    Set<FrequencyRegistration> bucket = entityRegistrations.get(ownerEntity);
+                    if (bucket != null) {
+                        bucket.remove(this);
+
+                        if (bucket.isEmpty()) {
+                            entityRegistrations.remove(ownerEntity);
+                        }
+                    }
+                }
+
+                if (ownerEntity != null) {
+                    ReceiverOwnerPosition tracked = receiverOwnerPositions.get(ownerEntity);
+                    if (tracked != null && --tracked.receiverCount == 0) {
+                        receiverOwnerPositions.remove(ownerEntity);
+                    }
+                }
             }
 
             removed = true;
+        }
+
+        private void unsubscribe() {
+            if (!subscribed) {
+                return;
+            }
+
+            pendingReceiverSpatialRefreshes.remove(this);
+
+            if (hasWorldPositionSample) {
+                receiverSpatialIndex.remove(receiver);
+                hasWorldPositionSample = false;
+            }
+
+            receiverSubscriptionIndex.remove(subscriptionEntry);
+            subscriptionEntry = null;
+
+            subscribed = false;
+            subscribedReceiverCount--;
         }
     }
 
@@ -140,6 +208,310 @@ public final class FrequencyEngine {
     }
 
     public FrequencyRegistration registerReceiver(FrequencyReceiver receiver) {
+        return registerReceiverInternal(receiver, null, null);
+    }
+
+    public FrequencyRegistration subscribeReceiver(FrequencyReceiver receiver) {
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        ReceiverRegistration registration = receivers.get(receiver);
+        if (registration == null) {
+            throw new IllegalStateException("Receiver is not registered");
+        }
+
+        if (registration.subscribed) {
+            throw new IllegalStateException("Receiver is already subscribed");
+        }
+
+        captureReceiverSubscriptionBand(registration);
+        registration.subscriptionEntry = receiverSubscriptionIndex.add(receiver, registration.subscribedMinHz, registration.subscribedMaxHz);
+        registration.subscribed = true;
+        subscribedReceiverCount++;
+
+        return new FrequencyRegistration() {
+            private boolean closed;
+
+            @Override
+            public void close() {
+                if (closed) {
+                    return;
+                }
+
+                if (!stopped) {
+                    checkWritable();
+
+                    if (!registration.removed) {
+                        registration.unsubscribe();
+                    }
+                }
+
+                closed = true;
+            }
+        };
+    }
+
+    public void updateReceiverSubscription(FrequencyReceiver receiver) {
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        ReceiverRegistration registration = receivers.get(receiver);
+        if (registration == null || !registration.subscribed) {
+            throw new IllegalStateException("Receiver has no active subscription");
+        }
+
+        captureReceiverSubscriptionBand(registration);
+        receiverSubscriptionIndex.update(registration.subscriptionEntry, registration.subscribedMinHz, registration.subscribedMaxHz);
+    }
+
+    private void captureReceiverSubscriptionBand(ReceiverRegistration registration) {
+        double frequency = registration.receiver.tunedFrequencyHz();
+        double tolerance = registration.receiver.toleranceHz();
+
+        if (!Double.isFinite(frequency) || frequency <= 0.0 || !Double.isFinite(tolerance) || tolerance < 0.0) {
+            throw new IllegalArgumentException("Invalid receiver subscription tuning");
+        }
+
+        double maximum = frequency + tolerance;
+        if (!Double.isFinite(maximum)) {
+            throw new IllegalArgumentException("Receiver subscription range overflow");
+        }
+
+        registration.subscribedMinHz = Math.max(0.0, frequency - tolerance);
+        registration.subscribedMaxHz = maximum;
+    }
+
+    boolean receiverSubscriptionCovers(FrequencyReceiver receiver, double frequencyHz) {
+        Objects.requireNonNull(receiver);
+        checkRunning();
+
+        if (!Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            return false;
+        }
+
+        ReceiverRegistration registration = receivers.get(receiver);
+        return registration != null && registration.subscribed && frequencyHz >= registration.subscribedMinHz && frequencyHz <= registration.subscribedMaxHz;
+    }
+
+    public void forEachReceiverSubscribedTo(double frequencyHz, java.util.function.Consumer<FrequencyReceiver> consumer) {
+        Objects.requireNonNull(consumer);
+        checkRunning();
+
+        if (!Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            throw new IllegalArgumentException("Invalid discovery frequency");
+        }
+
+        activeQueries++;
+        try {
+            receiverSubscriptionIndex.forEachContaining(frequencyHz, consumer);
+        } finally {
+            activeQueries--;
+        }
+    }
+
+    public void updateReceiverWorldPosition(FrequencyReceiver receiver) {
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        ReceiverRegistration registration = receivers.get(receiver);
+
+        if (registration == null || !registration.subscribed) {
+            throw new IllegalStateException("Receiver must be registered and subscribed");
+        }
+
+        Vec3 position = FrequencySpace.worldPosition(level, Objects.requireNonNull(receiver.position()));
+        receiverSpatialIndex.update(receiver, position.x, position.y, position.z);
+
+        registration.hasWorldPositionSample = true;
+        pendingReceiverSpatialRefreshes.remove(registration);
+    }
+
+    public void markReceiverWorldPositionDirty(FrequencyReceiver receiver) {
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        ReceiverRegistration registration = receivers.get(receiver);
+        if (registration == null || !registration.subscribed) {
+            throw new IllegalStateException("Receiver must be registered and subscribed");
+        }
+
+        markReceiverRegistrationDirty(registration);
+    }
+
+    private void markReceiverRegistrationDirty(ReceiverRegistration registration) {
+        if (registration.removed || !registration.subscribed) {
+            return;
+        }
+
+        if (registration.hasWorldPositionSample) {
+            receiverSpatialIndex.remove(registration.receiver);
+            registration.hasWorldPositionSample = false;
+        }
+
+        pendingReceiverSpatialRefreshes.add(registration);
+    }
+
+    public int processDirtyReceiverWorldPositions(int maxUpdates) {
+        checkWritable();
+
+        if (maxUpdates < 0) {
+            throw new IllegalArgumentException("Negative spatial refresh budget");
+        }
+
+        int refreshed = 0;
+
+        while (refreshed < maxUpdates && !pendingReceiverSpatialRefreshes.isEmpty()) {
+            ReceiverRegistration registration = pendingReceiverSpatialRefreshes.iterator().next();
+
+            if (registration.removed || !registration.subscribed) {
+                pendingReceiverSpatialRefreshes.remove(registration);
+                continue;
+            }
+
+            updateReceiverWorldPosition(registration.receiver);
+            refreshed++;
+        }
+
+        return refreshed;
+    }
+
+    public int pendingReceiverWorldPositionRefreshCount() {
+        checkRunning();
+        return pendingReceiverSpatialRefreshes.size();
+    }
+
+
+    public void forEachReceiverSubscribedSnapshotInRange(double frequencyHz, Vec3 worldCenter, double rangeMeters, java.util.function.Consumer<FrequencyReceiver> consumer) {
+        Objects.requireNonNull(worldCenter);
+        Objects.requireNonNull(consumer);
+        checkRunning();
+
+        if (!Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            throw new IllegalArgumentException("Invalid discovery frequency");
+        }
+
+        activeQueries++;
+
+        try {
+            receiverSpatialIndex.forEachWithin(
+                    worldCenter.x,
+                    worldCenter.y,
+                    worldCenter.z,
+                    rangeMeters,
+                    receiver -> {
+                        ReceiverRegistration registration = receivers.get(receiver);
+                        if (registration == null || !registration.subscribed) {
+                            return;
+                        }
+
+                        if (frequencyHz >= registration.subscribedMinHz && frequencyHz <= registration.subscribedMaxHz) {
+                            consumer.accept(receiver);
+                        }
+                    });
+        } finally {
+            activeQueries--;
+        }
+    }
+
+
+    public void forEachReceiverSubscribedLiveInRange(double frequencyHz, Vec3 worldCenter, double rangeMeters, java.util.function.Consumer<FrequencyReceiver> consumer) {
+        Objects.requireNonNull(worldCenter);
+        Objects.requireNonNull(consumer);
+        checkRunning();
+
+        if (!Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            throw new IllegalArgumentException("Invalid discovery frequency");
+        }
+
+        if (!Double.isFinite(rangeMeters) || rangeMeters < 0.0) {
+            throw new IllegalArgumentException("Invalid discovery range");
+        }
+
+        if (!Double.isFinite(worldCenter.x) || !Double.isFinite(worldCenter.y) || !Double.isFinite(worldCenter.z)) {
+            throw new IllegalArgumentException("Invalid world-space center");
+        }
+
+        double rangeSquared = rangeMeters * rangeMeters;
+        activeQueries++;
+        try {
+            receiverSubscriptionIndex.forEachContaining(
+                    frequencyHz,
+                    receiver -> {
+                        Vec3 worldPosition = Objects.requireNonNull(FrequencySpace.worldPosition(level, Objects.requireNonNull(receiver.position())));
+                        if (!Double.isFinite(worldPosition.x) || !Double.isFinite(worldPosition.y) || !Double.isFinite(worldPosition.z)) {
+                            throw new IllegalStateException("Invalid receiver world position");
+                        }
+
+                        double dx = worldPosition.x - worldCenter.x;
+                        double dy = worldPosition.y - worldCenter.y;
+                        double dz = worldPosition.z - worldCenter.z;
+
+                        if (Math.abs(dx) > rangeMeters || Math.abs(dy) > rangeMeters || Math.abs(dz) > rangeMeters) {
+                            return;
+                        }
+
+                        boolean withinRange;
+
+                        if (rangeMeters > 1.0e154) {
+                            withinRange = Math.hypot(Math.hypot(dx, dy), dz) <= rangeMeters;
+                        } else {
+                            withinRange = Math.fma(dx, dx, Math.fma(dy, dy, dz * dz)) <= rangeSquared;
+                        }
+
+                        if (withinRange) {
+                            consumer.accept(receiver);
+                        }
+                    });
+        } finally {
+            activeQueries--;
+        }
+    }
+
+    public void forEachSubscribedReceiverForEmitterInRange(FrequencyEmitter emitter, double rangeMeters, java.util.function.Consumer<FrequencyReceiver> consumer) {
+        Objects.requireNonNull(emitter);
+        Objects.requireNonNull(consumer);
+        checkRunning();
+
+        if (!Double.isFinite(rangeMeters) || rangeMeters < 0.0) {
+            throw new IllegalArgumentException("Invalid discovery range");
+        }
+
+        Double registeredFrequency = emitters.get(emitter);
+        if (registeredFrequency == null) {
+            throw new IllegalStateException("Emitter is not registered");
+        }
+
+        if (!emitter.isEmitting()) {
+            return;
+        }
+
+        FrequencySignal signal = Objects.requireNonNull(emitter.signal());
+        if (Double.compare(registeredFrequency, signal.frequencyHz()) != 0) {
+            throw new IllegalStateException("Emitter frequency changed without updateEmitter()");
+        }
+
+        Vec3 sourceWorldPosition = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
+        forEachReceiverSubscribedLiveInRange(signal.frequencyHz(), sourceWorldPosition, rangeMeters, consumer);
+    }
+
+    public FrequencyRegistration registerReceiverChunkBound(BlockPos ownerPos, FrequencyReceiver receiver) {
+        Objects.requireNonNull(ownerPos);
+        long chunkKey = ChunkPos.asLong(ownerPos.getX() >> 4, ownerPos.getZ() >> 4);
+
+        return registerReceiverInternal(receiver, chunkKey, null);
+    }
+
+    FrequencyRegistration registerReceiverEntityBound(Entity owner, FrequencyReceiver receiver) {
+        Objects.requireNonNull(owner);
+
+        if (owner.isRemoved() || owner.level() != level) {
+            throw new IllegalArgumentException("Receiver owner is removed or belongs to another level");
+        }
+
+        return registerReceiverInternal(receiver, null, owner);
+    }
+
+    private FrequencyRegistration registerReceiverInternal(FrequencyReceiver receiver, Long ownerChunk, Entity ownerEntity) {
         Objects.requireNonNull(receiver);
         checkWritable();
 
@@ -147,8 +519,20 @@ public final class FrequencyEngine {
             throw new IllegalStateException("Receiver already registered");
         }
 
-        ReceiverRegistration registration = new ReceiverRegistration(receiver);
+        ReceiverRegistration registration = new ReceiverRegistration(receiver, ownerChunk, ownerEntity);
         receivers.put(receiver, registration);
+
+        if (ownerChunk != null) {
+            chunkRegistrations.computeIfAbsent(ownerChunk, unused -> new HashSet<>()).add(registration);
+        }
+
+        if (ownerEntity != null) {
+            entityRegistrations.computeIfAbsent(ownerEntity, unused -> new HashSet<>()).add(registration);
+        }
+
+        if (ownerEntity != null) {
+            receiverOwnerPositions.computeIfAbsent(ownerEntity, unused -> new ReceiverOwnerPosition()).receiverCount++;
+        }
 
         return registration;
     }
@@ -200,21 +584,62 @@ public final class FrequencyEngine {
         Objects.requireNonNull(entity);
         checkWritable();
 
-        Set<EmitterRegistration> registrations = entityRegistrations.remove(entity);
+        Set<FrequencyRegistration> registrations = entityRegistrations.remove(entity);
         if (registrations == null) {
             return;
         }
 
-        for (EmitterRegistration registration : registrations) {
+        for (FrequencyRegistration registration : registrations) {
             registration.close();
+        }
+    }
+
+    void onTrackedEntityTick(Entity entity) {
+        ReceiverOwnerPosition tracked = receiverOwnerPositions.get(entity);
+        if (tracked == null) {
+            return;
+        }
+
+        checkWritable();
+
+        Vec3 position = Objects.requireNonNull(entity.position(), "Tracked entity position is unavailable");
+        if (tracked.initialized && tracked.x == position.x && tracked.y == position.y && tracked.z == position.z) {
+            return;
+        }
+
+        tracked.x = position.x;
+        tracked.y = position.y;
+        tracked.z = position.z;
+        tracked.initialized = true;
+
+        onEntityPositionChanged(entity);
+    }
+
+    void onEntityPositionChanged(Entity entity) {
+        Objects.requireNonNull(entity);
+        checkWritable();
+        Set<FrequencyRegistration> owned = entityRegistrations.get(entity);
+
+        if (owned == null) {
+            return;
+        }
+
+        for (FrequencyRegistration registration : owned) {
+            if (registration instanceof ReceiverRegistration receiver) {
+                markReceiverRegistrationDirty(receiver);
+            }
         }
     }
 
     void onChunkUnload(long chunkKey) {
         checkWritable();
-        Set<EmitterRegistration> registrations = chunkRegistrations.remove(chunkKey);
-        if (registrations == null) return;
-        for (EmitterRegistration registration : registrations) {
+
+        Set<FrequencyRegistration> registrations = chunkRegistrations.remove(chunkKey);
+        if (registrations == null) {
+            return;
+        }
+
+        for (FrequencyRegistration registration : registrations) {
             registration.close();
         }
     }
@@ -224,17 +649,40 @@ public final class FrequencyEngine {
         Objects.requireNonNull(emitter);
         checkWritable();
 
-        FrequencyRegistration delegate = register(emitter);
+        return bindSublevel(sublevelId, register(emitter));
+    }
 
+    FrequencyRegistration registerReceiverSublevelBound(UUID sublevelId, FrequencyReceiver receiver) {
+        Objects.requireNonNull(sublevelId);
+        Objects.requireNonNull(receiver);
+        checkWritable();
+
+        return bindSublevel(sublevelId, registerReceiver(receiver));
+    }
+
+    private FrequencyRegistration bindSublevel(UUID sublevelId, FrequencyRegistration delegate) {
         final class BoundRegistration implements FrequencyRegistration {
             private boolean closed;
 
             @Override
             public void close() {
-                if (closed) return;
+                if (closed) {
+                    return;
+                }
 
                 delegate.close();
                 closed = true;
+
+                if (delegate instanceof ReceiverRegistration receiver) {
+                    Set<ReceiverRegistration> owned = sublevelReceiverRegistrations.get(sublevelId);
+                    if (owned != null) {
+                        owned.remove(receiver);
+
+                        if (owned.isEmpty()) {
+                            sublevelReceiverRegistrations.remove(sublevelId);
+                        }
+                    }
+                }
 
                 Set<FrequencyRegistration> registrations = sublevelRegistrations.get(sublevelId);
                 if (registrations != null) {
@@ -248,9 +696,53 @@ public final class FrequencyEngine {
         }
 
         FrequencyRegistration bound = new BoundRegistration();
+        if (delegate instanceof ReceiverRegistration receiver) {
+            sublevelReceiverRegistrations.computeIfAbsent(sublevelId, unused -> new HashSet<>()).add(receiver);
+        }
+
         sublevelRegistrations.computeIfAbsent(sublevelId, unused -> new HashSet<>()).add(bound);
 
         return bound;
+    }
+
+    void onSublevelPoseChanged(UUID sublevelId) {
+        Objects.requireNonNull(sublevelId);
+        checkWritable();
+        Set<ReceiverRegistration> owned = sublevelReceiverRegistrations.get(sublevelId);
+
+        if (owned == null) {
+            return;
+        }
+
+        for (ReceiverRegistration receiver : owned) {
+            markReceiverRegistrationDirty(receiver);
+        }
+    }
+
+    void forEachReceiverSublevelId(java.util.function.Consumer<UUID> consumer) {
+        Objects.requireNonNull(consumer);
+
+        if (stopped) {
+            return;
+        }
+
+        checkRunning();
+        for (UUID id : sublevelReceiverRegistrations.keySet()) {
+            consumer.accept(id);
+        }
+    }
+
+    boolean hasReceiverSublevel(UUID sublevelId) {
+        Objects.requireNonNull(sublevelId);
+
+        if (stopped) {
+            return false;
+        }
+
+        checkRunning();
+        Set<ReceiverRegistration> owned = sublevelReceiverRegistrations.get(sublevelId);
+
+        return owned != null && !owned.isEmpty();
     }
 
     void onSublevelRemoved(UUID sublevelId) {
@@ -260,6 +752,7 @@ public final class FrequencyEngine {
         checkWritable();
 
         Set<FrequencyRegistration> registrations = sublevelRegistrations.remove(sublevelId);
+        sublevelReceiverRegistrations.remove(sublevelId);
         if (registrations == null) return;
 
         for (FrequencyRegistration registration : registrations) {
@@ -296,7 +789,6 @@ public final class FrequencyEngine {
         }
 
         long tick = level.getServer().getTickCount();
-
         EmitterMotionSample sample = emitterMotionSamples.computeIfAbsent(emitter, unused -> new EmitterMotionSample());
         if (continuous && sample.tick == tick && sample.frame == frame && Objects.equals(sample.sublevelId, sublevelId)) {
             return;
@@ -776,16 +1268,27 @@ public final class FrequencyEngine {
         return receivers.size();
     }
 
+    public int subscribedReceiverCount() {
+        checkRunning();
+        return subscribedReceiverCount;
+    }
+
     void shutdown() {
         stopped = true;
         interferenceWorkspaces.clear();
         emitters.clear();
         receivers.clear();
+        subscribedReceiverCount = 0;
+        receiverSubscriptionIndex.clear();
+        receiverSpatialIndex.clear();
+        pendingReceiverSpatialRefreshes.clear();
         byFrequency.clear();
         emitterMotionSamples.clear();
         chunkRegistrations.clear();
         entityRegistrations.clear();
+        receiverOwnerPositions.clear();
         sublevelRegistrations.clear();
+        sublevelReceiverRegistrations.clear();
     }
 
     private static final class FrequencyBucket {

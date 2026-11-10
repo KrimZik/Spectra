@@ -2625,4 +2625,817 @@ class InterferenceFftExperimentTest {
             System.out.printf(Locale.ROOT, "[FREQ-DUAL-LAYOUT] " + "layout=%s carriers=%d " + "build=%.3f ms " + "query=%.3f ms " + "rebuild=%.3f ms " + "result=%.8f " + "shifted=%.8f%n", names[layout], count, buildMs, times[2] / 1_000_000.0, rebuildMs, result, shiftedResult);
         }
     }
+
+    @Test
+    void dualTreeHandlesDuplicateMergingAndDopplerReordering() {
+        Random random = new Random(0x31D00B9L);
+
+        int count = 1_024;
+        double[] frequencies = new double[count];
+        double[] real = new double[count];
+        double[] imaginary = new double[count];
+
+        for (int i = 0; i < count; i++) {
+            frequencies[i] = 915_000_000.0 + (i / 8) * 0.125;
+
+            double amplitude = 0.1 + random.nextDouble();
+            double phase = random.nextDouble() * 2.0 * Math.PI;
+
+            real[i] = amplitude * Math.cos(phase);
+            imaginary[i] = amplitude * Math.sin(phase);
+        }
+
+        double[] mergedHz = new double[count];
+        double[] mergedReal = new double[count];
+        double[] mergedImaginary = new double[count];
+        int unique = 0;
+
+        for (int i = 0; i < count; i++) {
+            if (unique > 0
+                    && mergedHz[unique - 1] == frequencies[i]) {
+                mergedReal[unique - 1] += real[i];
+                mergedImaginary[unique - 1] += imaginary[i];
+            } else {
+                mergedHz[unique] = frequencies[i];
+                mergedReal[unique] = real[i];
+                mergedImaginary[unique] = imaginary[i];
+                unique++;
+            }
+        }
+
+        assertEquals(128, unique);
+
+        double[] compactHz = Arrays.copyOf(mergedHz, unique);
+        double[] compactReal = Arrays.copyOf(mergedReal, unique);
+        double[] compactImaginary = Arrays.copyOf(mergedImaginary, unique);
+
+        FastSincTree mergedTree = new FastSincTree(compactHz, true, true);
+
+        for (double window : new double[]{1.0e-6, 0.0130137, 0.25}) {
+            double expected = directSparsePower(frequencies, real, imaginary, window);
+            double actual = mergedTree.dualTreeMeanSquare(compactReal, compactImaginary, window);
+
+            assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Coherent duplicate merging changed signal power");
+        }
+
+        double[] originalHz = {
+                915_000_000.0,
+                915_000_000.25,
+                915_000_000.5,
+                915_000_000.75,
+                2_400_000_000.125,
+                2_400_000_000.25
+        };
+
+        double[] shifts = {
+                0.6, -0.2, 0.0, -0.3, 0.5, -0.5
+        };
+
+        double[] originalReal = {
+                1.0, -0.7, 0.2, 0.9, -0.3, 0.4
+        };
+
+        double[] originalImaginary = {
+                0.2, 0.5, -0.6, 0.1, 0.8, -0.4
+        };
+
+        int n = originalHz.length;
+        double[] shiftedHz = new double[n];
+
+        Integer[] order = new Integer[n];
+
+        for (int i = 0; i < n; i++) {
+            shiftedHz[i] = originalHz[i] + shifts[i];
+            order[i] = i;
+        }
+
+        Arrays.sort(order, (a, b) -> Double.compare(shiftedHz[a], shiftedHz[b]));
+
+        double[] sortedHz = new double[n];
+        double[] sortedReal = new double[n];
+        double[] sortedImaginary = new double[n];
+
+        for (int i = 0; i < n; i++) {
+            int source = order[i];
+
+            sortedHz[i] = shiftedHz[source];
+            sortedReal[i] = originalReal[source];
+            sortedImaginary[i] = originalImaginary[source];
+        }
+
+        assertNotEquals(0, (int) order[0], "Test did not exercise frequency reordering");
+        FastSincTree shiftedTree = new FastSincTree(sortedHz, true, true);
+
+        for (double window : new double[]{1.0e-6, 0.0130137, 0.25}) {
+            double expected = directSparsePower(sortedHz, sortedReal, sortedImaginary, window);
+            double actual = shiftedTree.dualTreeMeanSquare(sortedReal, sortedImaginary, window);
+
+            assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Doppler reordering changed signal associations");
+        }
+
+        System.out.printf(Locale.ROOT, "[FREQ-DUAL-PREPROCESSED] " + "signals=%d unique=%d " + "duplicatesMerged=%d " + "dopplerReorder=PASS%n", count, unique, count - unique);
+    }
+
+    @Test
+    void productionSortedCarriersPreservePhaseAndFrequency() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+
+        double[] frequencies = {
+                2_400_000_000.0,
+                915_000_000.125,
+                915_000_000.0,
+                915_000_000.125,
+                30_000_000.0
+        };
+
+        double[] amplitudes = {0.5, 1.2, 0.7, 0.3, 0.9};
+        double[] phases = {0.2, 1.1, 2.4, 0.6, 1.8};
+
+        double[] expectedHz = {
+                30_000_000.0,
+                915_000_000.0,
+                915_000_000.125,
+                2_400_000_000.0
+        };
+
+        double[] expectedReal = new double[expectedHz.length];
+        double[] expectedImaginary = new double[expectedHz.length];
+
+        for (int i = 0; i < frequencies.length; i++) {
+            double hz = frequencies[i];
+
+            FrequencySignal signal = new FrequencySignal(hz, 1.0, phases[i], 343.0);
+            accumulator.add(signal, amplitudes[i], 0.0);
+            double phase = FrequencyMath.phaseAtTick(hz, tick, phases[i], 0.0);
+            phase -= FrequencyMath.phaseAdvanceRadians(hz, window * 0.5);
+
+            for (int j = 0; j < expectedHz.length; j++) {
+                if (hz == expectedHz[j]) {
+                    expectedReal[j] += amplitudes[i] * Math.cos(phase);
+                    expectedImaginary[j] += amplitudes[i] * Math.sin(phase);
+                    break;
+                }
+            }
+        }
+
+        var sorted = accumulator.sortedCarriers();
+        assertArrayEquals(expectedHz, sorted.frequencies());
+
+        for (int i = 0; i < expectedHz.length; i++) {
+            assertEquals(expectedReal[i], sorted.real()[i], 1.0e-12);
+            assertEquals(expectedImaginary[i], sorted.imaginary()[i], 1.0e-12);
+        }
+
+        double expectedPower = directSparsePower(expectedHz, expectedReal, expectedImaginary, window);
+        double currentPower = accumulator.meanSquareWindow(window);
+
+        assertEquals(expectedPower, currentPower, 2.0e-9 * Math.max(1.0, Math.abs(expectedPower)));
+
+        System.out.printf(Locale.ROOT, "[FREQ-PRODUCTION-SORT] " + "inputs=%d unique=%d " + "phase=PASS ordering=PASS power=PASS%n", frequencies.length, sorted.frequencies().length);
+    }
+
+    @Test
+    void extractedProductionDualTreeMatchesDirectAnalyticalPower() {
+        Random random = new Random(0x32B2026L);
+
+        for (int count : new int[]{64, 256, 1_024}) {
+            double[] frequencies = new double[count];
+            double[] real = new double[count];
+            double[] imaginary = new double[count];
+
+            for (int i = 0; i < count; i++) {
+                double hz = 30_000_000.0 + 5_970_000_000.0 * i / (count - 1);
+                if (i > 0 && i % 8 == 0) {
+                    hz = frequencies[i - 1] + 0.125;
+                }
+
+                frequencies[i] = hz;
+                real[i] = random.nextGaussian() * 0.4;
+                imaginary[i] = random.nextGaussian() * 0.4;
+            }
+
+            FiniteWindowDualTree production = new FiniteWindowDualTree(frequencies);
+
+            for (double window : new double[]{1.0e-9, 1.0e-6, 0.0130137, 0.25}) {
+                double expected = directSparsePower(frequencies, real, imaginary, window);
+                double actual = production.meanSquare(real, imaginary, window);
+
+                assertTrue(Double.isFinite(actual));
+                assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Production dual-tree mismatch: count=" + count + " window=" + window);
+            }
+
+            real[0] += 0.125;
+            imaginary[count - 1] -= 0.0625;
+
+            double expected = directSparsePower(frequencies, real, imaginary, 0.0130137);
+            double actual = production.meanSquare(real, imaginary, 0.0130137);
+
+            assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+
+            Arrays.fill(real, 0.0);
+            Arrays.fill(imaginary, 0.0);
+
+            assertEquals(0.0, production.meanSquare(real, imaginary, 0.0130137), 1.0e-12);
+
+            System.out.printf(Locale.ROOT, "[FREQ-PRODUCTION-DUAL] " + "carriers=%d analytical=PASS " + "updates=PASS reset=PASS%n", count);
+        }
+
+        assertThrows(IllegalArgumentException.class, () -> new FiniteWindowDualTree(new double[]{915_000_000.0, 915_000_000.0}));
+    }
+
+    @Test
+    void benchmarkProductionAccumulatorDualTreeCrossover() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        for (int layout = 0; layout < 2; layout++) {
+            for (int count : new int[]{8, 32, 64, 128, 256, 512, 1_024}) {
+                Random random = new Random(0x32C2026L + count * 131L + layout);
+
+                var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+
+                for (int i = 0; i < count; i++) {
+                    int slot = (i * 73) & (count - 1);
+                    double hz;
+
+                    if (layout == 0) {
+                        hz = 30_000_000.0 + 5_970_000_000.0 * slot / count + (slot % 7) * 0.125;
+                    } else {
+                        hz = 915_000_000.0 + slot * 0.125 + (slot % 7) * 0.015625;
+                    }
+
+                    double amplitude = 0.25 + random.nextDouble() * 1.5;
+                    double phase = random.nextDouble() * Math.PI * 2.0;
+                    double delay = random.nextDouble() * 0.025;
+
+                    accumulator.add(new FrequencySignal(hz, 1.0, phase, 343.0), amplitude, delay);
+                }
+
+                double exact = accumulator.meanSquareWindow(window);
+                double dual = accumulator.meanSquareWindowDualTreeProbe(window);
+                double tolerance = 2.0e-9 * Math.max(1.0, Math.abs(exact));
+
+                assertTrue(Double.isFinite(exact));
+                assertTrue(Double.isFinite(dual));
+
+                assertEquals(exact, dual, tolerance, "Production crossover mismatch layout=" + layout + " count=" + count);
+
+                for (int i = 0; i < 4; i++) {
+                    blackhole = accumulator.meanSquareWindow(window);
+                    blackhole = accumulator.meanSquareWindowDualTreeProbe(window);
+                }
+
+                int repetitions = count >= 512 ? 4 : count >= 256 ? 8 : count >= 128 ? 16 : 40;
+
+                double[] exactTimes = new double[5];
+                double[] dualTimes = new double[5];
+
+                for (int sample = 0; sample < 5; sample++) {
+                    long start = System.nanoTime();
+
+                    for (int j = 0; j < repetitions; j++) {
+                        blackhole = accumulator.meanSquareWindow(window);
+                    }
+
+                    exactTimes[sample] = (System.nanoTime() - start) / (repetitions * 1000.0);
+                    start = System.nanoTime();
+
+                    for (int j = 0; j < repetitions; j++) {
+                        blackhole = accumulator.meanSquareWindowDualTreeProbe(window);
+                    }
+
+                    dualTimes[sample] = (System.nanoTime() - start) / (repetitions * 1000.0);
+                }
+
+                Arrays.sort(exactTimes);
+                Arrays.sort(dualTimes);
+
+                double exactUs = exactTimes[2];
+                double dualUs = dualTimes[2];
+
+                System.out.printf(Locale.ROOT, "[FREQ-PRODUCTION-CROSSOVER] " + "layout=%s carriers=%d " + "exact=%.3f us " + "dual=%.3f us " + "speedup=%.2fx " + "error=%.3e%n", layout == 0 ? "wide" : "dense", count, exactUs, dualUs, exactUs / dualUs, Math.abs(exact - dual));
+            }
+        }
+    }
+
+    @Test
+    void productionAutomaticDispatchMatchesAnalyticalPower() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        for (int count : new int[]{63, 64, 512, 1_023, 1_024, 2_048}) {
+            Random random = new Random(0x32D2026L + count);
+            var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+
+            for (int i = 0; i < count; i++) {
+                double hz = 30_000_000.0 + random.nextDouble() * 5_970_000_000.0;
+                double amplitude = 0.25 + random.nextDouble() * 1.5;
+                double phase = random.nextDouble() * 2.0 * Math.PI;
+                double delay = random.nextDouble() * 0.025;
+
+                accumulator.add(new FrequencySignal(hz, 1.0, phase, 343.0), amplitude, delay);
+            }
+
+            var carriers = accumulator.sortedCarriers();
+            assertEquals(count, carriers.frequencies().length);
+
+            double expected = directSparsePower(carriers.frequencies(), carriers.real(), carriers.imaginary(), window);
+            double actual = accumulator.meanSquareWindow(window);
+            double tolerance = 2.0e-9 * Math.max(1.0, Math.abs(expected));
+
+            assertTrue(Double.isFinite(actual));
+            assertEquals(expected, actual, tolerance, "Automatic dispatch mismatch at " + count);
+
+            if (count == 1_024) {
+                double otherWindow = 0.25;
+                double expectedOther = directSparsePower(carriers.frequencies(), carriers.real(), carriers.imaginary(), otherWindow);
+                double actualOther = accumulator.meanSquareWindow(otherWindow);
+
+                assertEquals(expectedOther, actualOther, 2.0e-9 * Math.max(1.0, Math.abs(expectedOther)), "Different-window fallback mismatch");
+            }
+
+            System.out.printf(Locale.ROOT, "[FREQ-PRODUCTION-DISPATCH] " + "carriers=%d solver=%s " + "error=%.3e%n", count, count >= 1_024 ? "DUAL" : "EXACT", Math.abs(expected - actual));
+        }
+    }
+
+
+    @Test
+    void benchmarkProductionDispatchAllocationCost() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        if (memory == null) {
+            System.out.println("[FREQ-PRODUCTION-MEM] unavailable");
+            return;
+        }
+
+        if (!memory.isThreadAllocatedMemoryEnabled()) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        for (int count : new int[]{512, 1_024, 4_096}) {
+            FrequencySignal[] signals = new FrequencySignal[count];
+            double[] amplitudes = new double[count];
+            double[] delays = new double[count];
+
+            for (int i = 0; i < count; i++) {
+                int slot = (i * 73) & (count - 1);
+
+                double hz = 915_000_000.0 + slot * 0.125 + (slot % 7) * 0.015625;
+                signals[i] = new FrequencySignal(hz, 1.0, i * 0.137, 343.0);
+
+                amplitudes[i] = 0.25 + (i % 9) * 0.1;
+                delays[i] = (i % 17) * 0.0001;
+            }
+
+            var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+            for (int i = 0; i < count; i++) {
+                accumulator.add(signals[i], amplitudes[i], delays[i]);
+            }
+
+            int repetitions = count >= 4_096 ? 5 : 12;
+
+            for (int i = 0; i < 5; i++) {
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            long before = memory.getThreadAllocatedBytes(threadId);
+            long start = System.nanoTime();
+
+            for (int i = 0; i < repetitions; i++) {
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            double existingMs = (System.nanoTime() - start) / (repetitions * 1_000_000.0);
+            double existingBytes = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            for (int warmup = 0; warmup < 3; warmup++) {
+                var fresh = new FrequencyEngine.InterferenceAccumulator(tick, window);
+                for (int i = 0; i < count; i++) {
+                    fresh.add(signals[i], amplitudes[i], delays[i]);
+                }
+
+                blackhole = fresh.meanSquareWindow(window);
+            }
+
+            before = memory.getThreadAllocatedBytes(threadId);
+            start = System.nanoTime();
+
+            for (int iteration = 0; iteration < repetitions; iteration++) {
+                var fresh = new FrequencyEngine.InterferenceAccumulator(tick, window);
+
+                for (int i = 0; i < count; i++) {
+                    fresh.add(signals[i], amplitudes[i], delays[i]);
+                }
+
+                blackhole = fresh.meanSquareWindow(window);
+            }
+
+            double freshMs = (System.nanoTime() - start) / (repetitions * 1_000_000.0);
+            double freshBytes = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            assertTrue(Double.isFinite(blackhole));
+
+            System.out.printf(Locale.ROOT, "[FREQ-PRODUCTION-MEM] " + "carriers=%d " + "existing=%.3f ms " + "existingBytes=%.0f " + "fresh=%.3f ms " + "freshBytes=%.0f%n", count, existingMs, existingBytes, freshMs, freshBytes);
+        }
+    }
+
+    @Test
+    void productionDualTreeReusesGeometrySafely() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+        final int count = 1_024;
+
+        var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+        for (int i = 0; i < count; i++) {
+            int slot = (i * 73) & (count - 1);
+            double hz = 915_000_000.0 + slot * 0.125 + (slot % 7) * 0.015625;
+            accumulator.add(new FrequencySignal(hz, 1.0, i * 0.137, 343.0), 0.25 + (i % 9) * 0.1, (i % 17) * 0.0001);
+        }
+
+        var initial = accumulator.sortedCarriers();
+
+        double expected = directSparsePower(initial.frequencies(), initial.real(), initial.imaginary(), window);
+        assertEquals(expected, accumulator.meanSquareWindow(window), 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+
+        for (int i = 0; i < 8; i++) {
+            blackhole = accumulator.meanSquareWindow(window);
+        }
+
+        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+
+        if (memory != null) {
+            if (!memory.isThreadAllocatedMemoryEnabled()) {
+                memory.setThreadAllocatedMemoryEnabled(true);
+            }
+
+            long threadId = Thread.currentThread().threadId();
+            long before = memory.getThreadAllocatedBytes(threadId);
+
+            final int repetitions = 20;
+
+            for (int i = 0; i < repetitions; i++) {
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            double allocatedPerQuery = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+            System.out.printf(Locale.ROOT, "[FREQ-DUAL-REUSE-MEM] " + "carriers=%d allocated=%.1f bytes/query%n", count, allocatedPerQuery);
+        }
+
+        accumulator.add(new FrequencySignal(915_000_000.0, 1.0, 1.25, 343.0), 0.7, 0.004);
+
+        var updated = accumulator.sortedCarriers();
+        expected = directSparsePower(updated.frequencies(), updated.real(), updated.imaginary(), window);
+
+        assertEquals(expected, accumulator.meanSquareWindow(window), 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Existing-frequency update was not applied");
+        accumulator.add(new FrequencySignal(2_750_000_000.03125, 1.0, 0.75, 343.0), 0.8, 0.002);
+
+        var expanded = accumulator.sortedCarriers();
+        assertEquals(count + 1, expanded.frequencies().length);
+        expected = directSparsePower(expanded.frequencies(), expanded.real(), expanded.imaginary(), window);
+
+        assertEquals(expected, accumulator.meanSquareWindow(window), 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Frequency insertion did not rebuild geometry");
+
+        System.out.println("[FREQ-DUAL-REUSE] " + "initial=PASS " + "amplitudeUpdate=PASS " + "geometryRebuild=PASS");
+    }
+
+    @Test
+    void productionAccumulatorResetDoesNotLeakSignals() {
+        final double firstWindow = 0.0130137;
+        final double secondWindow = 0.25;
+        final long firstTick = 4_000_000_001L;
+        final long secondTick = firstTick + 17;
+
+        var reused = new FrequencyEngine.InterferenceAccumulator(firstTick, firstWindow);
+
+        for (int i = 0; i < 1_024; i++) {
+            double hz = 915_000_000.0 + i * 0.125;
+            reused.add(new FrequencySignal(hz, 1.0, i * 0.137, 343.0), 0.25 + (i % 9) * 0.1, (i % 17) * 0.0001);
+        }
+
+        blackhole = reused.meanSquareWindow(firstWindow);
+        reused.reset(secondTick, secondWindow);
+        var fresh = new FrequencyEngine.InterferenceAccumulator(secondTick, secondWindow);
+
+        double[] hz = {
+                30_000_000.0,
+                915_000_000.125,
+                915_000_000.125,
+                2_400_000_000.0
+        };
+
+        for (int i = 0; i < hz.length; i++) {
+            FrequencySignal signal = new FrequencySignal(hz[i], 1.0, i * 0.31, 343.0);
+
+            double amplitude = 0.5 + i * 0.2;
+            double delay = i * 0.001;
+
+            reused.add(signal, amplitude, delay);
+            fresh.add(signal, amplitude, delay);
+        }
+
+        double expected = fresh.meanSquareWindow(secondWindow);
+        double actual = reused.meanSquareWindow(secondWindow);
+
+        assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Reused accumulator retained previous signal data");
+
+        reused.reset(secondTick + 1, secondWindow);
+        assertEquals(0.0, reused.meanSquareWindow(secondWindow), 1.0e-12, "Empty receiver retained previous signal power");
+
+        var freshLarge = new FrequencyEngine.InterferenceAccumulator(secondTick + 2, firstWindow);
+        reused.reset(secondTick + 2, firstWindow);
+
+        for (int i = 0; i < 1_024; i++) {
+            double frequency = 2_400_000_000.0 + i * 0.125;
+            FrequencySignal signal = new FrequencySignal(frequency, 1.0, i * 0.071, 343.0);
+            double amplitude = 0.5 + (i % 5) * 0.1;
+
+            reused.add(signal, amplitude, 0.0);
+            freshLarge.add(signal, amplitude, 0.0);
+        }
+
+        expected = freshLarge.meanSquareWindow(firstWindow);
+        actual = reused.meanSquareWindow(firstWindow);
+
+        assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Large receiver state changed after reuse");
+
+        System.out.println("[FREQ-WORKSPACE-RESET] " + "largeToSmall=PASS " + "emptyReceiver=PASS " + "smallToLarge=PASS " + "timeAndWindow=PASS");
+    }
+
+    @Test
+    void productionDualTreeReusesGeometryAcrossResets() throws ReflectiveOperationException {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+        final int count = 1_024;
+
+        FrequencySignal[] signals = new FrequencySignal[count];
+
+        for (int i = 0; i < count; i++) {
+            int slot = (i * 73) & (count - 1);
+            double hz = 915_000_000.0 + slot * 0.125;
+
+            signals[i] = new FrequencySignal(hz, 1.0, i * 0.137, 343.0);
+        }
+
+        var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+        java.lang.reflect.Field treeField = FrequencyEngine.InterferenceAccumulator.class.getDeclaredField("cachedDualTree");
+        treeField.setAccessible(true);
+
+        for (int i = 0; i < count; i++) {
+            accumulator.add(signals[i], 0.25 + (i % 9) * 0.1, (i % 17) * 0.0001);
+        }
+
+        blackhole = accumulator.meanSquareWindow(window);
+
+        Object originalTree = treeField.get(accumulator);
+        assertNotNull(originalTree);
+
+        accumulator.reset(tick + 17, window);
+        for (int i = count - 1; i >= 0; i--) {
+            accumulator.add(signals[i], 0.5 + (i % 11) * 0.08, (i % 13) * 0.0002);
+        }
+
+        var reordered = accumulator.sortedCarriers();
+
+        double expected = directSparsePower(reordered.frequencies(), reordered.real(), reordered.imaginary(), window);
+        double actual = accumulator.meanSquareWindow(window);
+
+        assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+        assertSame(originalTree, treeField.get(accumulator), "Identical frequency geometry was rebuilt");
+
+        double secondWindow = 0.25;
+        accumulator.reset(tick + 30, secondWindow);
+
+        for (int i = 0; i < count; i++) {
+            accumulator.add(signals[i], 0.4 + (i % 7) * 0.1, (i % 9) * 0.0001);
+        }
+
+        var changedWindow = accumulator.sortedCarriers();
+
+        expected = directSparsePower(changedWindow.frequencies(), changedWindow.real(), changedWindow.imaginary(), secondWindow);
+
+        actual = accumulator.meanSquareWindow(secondWindow);
+        assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+        assertSame(originalTree, treeField.get(accumulator), "Window change unnecessarily rebuilt geometry");
+
+        accumulator.reset(tick + 40, window);
+
+        for (int i = 0; i < count; i++) {
+            FrequencySignal signal = i == count - 1 ? new FrequencySignal(2_400_000_000.125, 1.0, 0.75, 343.0) : signals[i];
+            accumulator.add(signal, 0.5 + (i % 5) * 0.1, 0.0001);
+        }
+
+        var replaced = accumulator.sortedCarriers();
+        expected = directSparsePower(replaced.frequencies(), replaced.real(), replaced.imaginary(), window);
+
+        actual = accumulator.meanSquareWindow(window);
+
+        assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+        assertNotSame(originalTree, treeField.get(accumulator), "Different frequency geometry was incorrectly reused");
+
+        for (int trial = 0; trial < 8; trial++) {
+            accumulator.reset(tick + trial, window);
+
+            for (int i = count - 1; i >= 0; i--) {
+                accumulator.add(signals[i], 0.5, 0.0001);
+            }
+
+            blackhole = accumulator.meanSquareWindow(window);
+        }
+
+        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        if (memory != null) {
+            if (!memory.isThreadAllocatedMemoryEnabled()) {
+                memory.setThreadAllocatedMemoryEnabled(true);
+            }
+
+            long threadId = Thread.currentThread().threadId();
+            long before = memory.getThreadAllocatedBytes(threadId);
+
+            final int repetitions = 12;
+            for (int trial = 0; trial < repetitions; trial++) {
+                accumulator.reset(tick + trial, window);
+                for (int i = count - 1; i >= 0; i--) {
+                    accumulator.add(signals[i], 0.5, 0.0001);
+                }
+
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            double bytesPerQuery = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            System.out.printf(Locale.ROOT, "[FREQ-CROSS-QUERY-MEM] " + "carriers=%d allocated=%.1f bytes/query%n", count, bytesPerQuery);
+        }
+
+        System.out.println("[FREQ-CROSS-QUERY] " + "sameGeometry=PASS " + "reordered=PASS " + "windowChange=PASS " + "differentGeometry=PASS");
+    }
+
+    @Test
+    void benchmarkAccumulatorWithoutMockito() {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+
+        if (memory == null) {
+            System.out.println("[FREQ-NO-MOCK] Allocation tracking unavailable");
+            return;
+        }
+
+        if (!memory.isThreadAllocatedMemoryEnabled()) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        for (int count : new int[]{128, 512, 1024, 4096}) {
+            FrequencySignal[] signals = new FrequencySignal[count];
+            double[] amplitudes = new double[count];
+            double[] delays = new double[count];
+
+            for (int i = 0; i < count; i++) {
+                int slot = (i * 73) & (count - 1);
+                double hz = 915_000_000.0 + slot * 0.125 + (slot % 7) * 0.015625;
+
+                signals[i] = new FrequencySignal(hz, 0.25 + (i % 9) * 0.1, i * 0.031, 343.0);
+                double distance = 1.0 + (i % 3) * 0.25;
+
+                amplitudes[i] = com.krimzik.spectra.math.FrequencyPropagation.amplitudeAtDistance(signals[i].amplitude(), distance);
+                delays[i] = com.krimzik.spectra.math.FrequencyPropagation.travelTimeSeconds(distance, signals[i].propagationSpeed());
+            }
+
+            var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+            int repetitions = count >= 4096 ? 8 : 24;
+
+            for (int pass = 0; pass < 12; pass++) {
+                accumulator.reset(tick + pass, window);
+
+                for (int i = 0; i < count; i++) {
+                    accumulator.add(signals[i], amplitudes[i], delays[i]);
+                }
+
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            long before = memory.getThreadAllocatedBytes(threadId);
+            long start = System.nanoTime();
+
+            for (int pass = 0; pass < repetitions; pass++) {
+                accumulator.reset(tick + pass, window);
+
+                for (int i = 0; i < count; i++) {
+                    accumulator.add(signals[i], amplitudes[i], delays[i]);
+                }
+            }
+
+            double addMs = (System.nanoTime() - start) / (repetitions * 1_000_000.0);
+            double addBytes = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            for (int pass = 0; pass < 12; pass++) {
+                accumulator.reset(tick + pass, window);
+
+                for (int i = 0; i < count; i++) {
+                    accumulator.add(signals[i], amplitudes[i], delays[i]);
+                }
+
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            before = memory.getThreadAllocatedBytes(threadId);
+            start = System.nanoTime();
+
+            for (int pass = 0; pass < repetitions; pass++) {
+                accumulator.reset(tick + pass, window);
+
+                for (int i = 0; i < count; i++) {
+                    accumulator.add(signals[i], amplitudes[i], delays[i]);
+                }
+
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            double fullMs = (System.nanoTime() - start) / (repetitions * 1_000_000.0);
+            double fullBytes = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            var fresh = new FrequencyEngine.InterferenceAccumulator(tick + repetitions - 1, window);
+            for (int i = 0; i < count; i++) {
+                fresh.add(signals[i], amplitudes[i], delays[i]);
+            }
+
+            double expected = fresh.meanSquareWindow(window);
+            assertEquals(expected, blackhole, 2.0e-9 * Math.max(1.0, Math.abs(expected)));
+            System.out.printf(Locale.ROOT, "[FREQ-NO-MOCK] " + "carriers=%d " + "add=%.3f ms %.0f bytes " + "full=%.3f ms %.0f bytes%n", count, addMs, addBytes, fullMs, fullBytes);
+        }
+    }
+
+    @Test
+    void productionExactSolverReusesTrigScratch() throws ReflectiveOperationException {
+        final long tick = 4_000_000_001L;
+        final double window = 0.0130137;
+
+        var accumulator = new FrequencyEngine.InterferenceAccumulator(tick, window);
+        var scratchField = FrequencyEngine.InterferenceAccumulator.class.getDeclaredField("exactTrigScratch");
+        scratchField.setAccessible(true);
+
+        double[] smallScratch = null;
+        double[] largeScratch = null;
+        for (int count : new int[]{128, 512, 128}) {
+            accumulator.reset(tick + count, window);
+
+            for (int i = 0; i < count; i++) {
+                double hz = 915_000_000.0 + i * 0.125 + (i % 7) * 0.015625;
+                accumulator.add(new FrequencySignal(hz, 1.0, i * 0.113, 343.0), 0.5 + (i % 9) * 0.1, (i % 13) * 0.0001);
+            }
+
+            var carriers = accumulator.sortedCarriers();
+            double expected = directSparsePower(carriers.frequencies(), carriers.real(), carriers.imaginary(), window);
+            double actual = accumulator.meanSquareWindow(window);
+
+            assertEquals(expected, actual, 2.0e-9 * Math.max(1.0, Math.abs(expected)), "Exact analytical power mismatch at " + count);
+
+            double[] scratch = (double[]) scratchField.get(accumulator);
+            assertNotNull(scratch);
+            assertTrue(scratch.length >= (count - 1) * 2, "Trigonometry buffer is too small");
+
+            if (smallScratch == null) {
+                smallScratch = scratch;
+
+            } else if (largeScratch == null) {
+                largeScratch = scratch;
+                assertNotSame(smallScratch, largeScratch, "Buffer failed to grow for larger workload");
+            } else {
+                assertSame(largeScratch, scratch, "Smaller workload allocated another buffer");
+            }
+        }
+
+        for (int i = 0; i < 12; i++) {
+            blackhole = accumulator.meanSquareWindow(window);
+        }
+
+        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        if (memory != null) {
+            if (!memory.isThreadAllocatedMemoryEnabled()) {
+                memory.setThreadAllocatedMemoryEnabled(true);
+            }
+
+            long threadId = Thread.currentThread().threadId();
+            long before = memory.getThreadAllocatedBytes(threadId);
+
+            final int repetitions = 32;
+
+            for (int i = 0; i < repetitions; i++) {
+                blackhole = accumulator.meanSquareWindow(window);
+            }
+
+            double bytesPerQuery = (memory.getThreadAllocatedBytes(threadId) - before) / (double) repetitions;
+
+            System.out.printf(Locale.ROOT, "[FREQ-EXACT-SCRATCH] " + "allocated=%.1f bytes/query%n", bytesPerQuery);
+        }
+
+        System.out.println("[FREQ-EXACT-SCRATCH] " + "accuracy=PASS " + "bufferGrowth=PASS " + "bufferReuse=PASS");
+    }
 }
