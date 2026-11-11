@@ -2,6 +2,7 @@ package com.krimzik.spectra.api;
 
 import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.TRx.FrequencyReceiver;
+import com.krimzik.spectra.api.material.FrequencyMaterialData;
 import com.krimzik.spectra.api.motion.FrequencyMotion;
 import com.krimzik.spectra.api.registration.FrequencyRegistration;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -9,6 +10,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.Entity;
 import net.neoforged.fml.ModList;
+import net.neoforged.neoforge.event.AddReloadListenerEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.common.NeoForge;
@@ -30,6 +32,7 @@ public final class FrequencyApi {
     private FrequencyApi() {}
 
     public static void init() {
+        NeoForge.EVENT_BUS.addListener((AddReloadListenerEvent event) -> event.addListener(new FrequencyMaterialData()));
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onChunkUnload);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onLevelUnload);
         NeoForge.EVENT_BUS.addListener(FrequencyApi::onServerStopped);
