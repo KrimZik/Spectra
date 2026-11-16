@@ -6,6 +6,7 @@ import com.krimzik.spectra.api.consumers.FrequencyDopplerMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer;
 import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
+import com.krimzik.spectra.api.material.FrequencySableMaterialAttenuation;
 import com.krimzik.spectra.api.motion.FrequencyMotion;
 import com.krimzik.spectra.api.motion.FrequencyMotionSnapshot;
 import com.krimzik.spectra.api.motion.FrequencyAccelerationTracker;
@@ -1305,10 +1306,10 @@ public final class FrequencyEngine {
 
                         if (FrequencyMaterialAttenuation.enabled()) {
                             amplitude *= FrequencyMaterialAttenuation.factor(level, emitterWorldPos, receiverWorldPos);
+                            amplitude *= FrequencySableMaterialAttenuation.factor(level, emitterWorldPos, receiverWorldPos);
                         }
 
                         double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());
-
                         receptionConsumer.accept(emitter, signal, distanceSquared, amplitude, travelTime);
                     }
                 }
