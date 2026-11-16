@@ -5,10 +5,14 @@ import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
 import com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer;
 import com.krimzik.spectra.api.material.FrequencyMaterialRules;
+import com.krimzik.spectra.api.material.FrequencySableMaterialAttenuation;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -42,29 +46,35 @@ class FrequencyMaterialBenchmarkTest {
     private static final class World {
         final ServerLevel level;
         final MinecraftServer server;
+        final ServerChunkCache chunkSource;
+        final LevelChunk chunk;
+
         Terrain terrain = Terrain.LOADED;
 
         World() {
             server = mock(MinecraftServer.class, withSettings().stubOnly());
             level = mock(ServerLevel.class, withSettings().stubOnly());
+            chunkSource = mock(ServerChunkCache.class, withSettings().stubOnly());
+            chunk = mock(LevelChunk.class, withSettings().stubOnly());
 
             when(level.getServer()).thenReturn(server);
             when(server.isSameThread()).thenReturn(true);
             when(level.getMinBuildHeight()).thenReturn(-64);
             when(level.getMaxBuildHeight()).thenReturn(320);
+            when(level.getChunkSource()).thenReturn(chunkSource);
 
-            when(level.hasChunk(anyInt(), anyInt())).thenAnswer(call -> {
+            when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
                 int cx = call.getArgument(0);
                 int cz = call.getArgument(1);
 
                 return switch (terrain) {
-                    case LOADED -> true;
-                    case UNLOADED -> false;
-                    case MIXED -> cz == 0 && (cx == 0 || cx == 2);
+                    case LOADED -> chunk;
+                    case UNLOADED -> null;
+                    case MIXED -> cz == 0 && (cx == 0 || cx == 2) ? chunk : null;
                 };
             });
 
-            when(level.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+            when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
                 BlockPos pos = call.getArgument(0);
 
                 if (terrain == Terrain.MIXED) {
@@ -174,8 +184,10 @@ class FrequencyMaterialBenchmarkTest {
         FrequencySignal signal = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
         Receiver receiver = new Receiver(END, 440.0, 0.0);
 
-        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class);
+        MockedStatic<FrequencySableMaterialAttenuation> sable = mockStatic(FrequencySableMaterialAttenuation.class)) {
             space.when(() -> FrequencySpace.worldPosition(eq(world.level), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
+            sable.when(() -> FrequencySableMaterialAttenuation.factor(eq(world.level), any(Vec3.class), any(Vec3.class))).thenReturn(1.0);
 
             for (int count : COUNTS) {
                 FrequencyEngine engine = new FrequencyEngine(world.level);
@@ -225,148 +237,66 @@ class FrequencyMaterialBenchmarkTest {
         }
     }
 
-
     @Test
-    void profileMockitoMaterialOperationCosts() {
-        World world = new World();
-        world.terrain = Terrain.LOADED;
+    void profileEmptySectionFastPath() {
+        ServerLevel level = mock(ServerLevel.class, withSettings().stubOnly());
+        ServerChunkCache chunkSource = mock(ServerChunkCache.class, withSettings().stubOnly());
+        LevelChunk chunk = mock(LevelChunk.class, withSettings().stubOnly());
+        LevelChunkSection section = mock(LevelChunkSection.class, withSettings().stubOnly());
 
-        com.sun.management.ThreadMXBean memory = memoryBean();
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos(16, 64, 0);
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = section;
 
-        for (int count : new int[]{1_000, 10_000}) {
-            Runnable chunkLookup = () -> {
-                int found = 0;
+        int[] mode = {0};
 
-                for (int i = 0; i < count; i++) {
-                    if (world.level.hasChunk(1, 0)) {
-                        found++;
-                    }
-                }
+        when(level.getMinBuildHeight()).thenReturn(-64);
+        when(level.getMaxBuildHeight()).thenReturn(320);
+        when(level.getChunkSource()).thenReturn(chunkSource);
 
-                blackhole = found;
-            };
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenReturn(chunk);
+        when(chunk.getSections()).thenReturn(sections);
 
-            Runnable blockLookup = () -> {
-                int found = 0;
+        when(section.hasOnlyAir()).thenAnswer(call -> mode[0] == 0);
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> mode[0] == 2 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
 
-                for (int i = 0; i < count; i++) {
-                    if (world.level.getBlockState(pos) != null) {
-                        found++;
-                    }
-                }
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(128.5, 64.5, 0.5);
 
-                blackhole = found;
-            };
+        String[] names = {
+                "EMPTY_SECTION",
+                "AIR_IN_NONEMPTY_SECTION",
+                "SOLID_SECTION"
+        };
 
-            Runnable classification = () -> {
-                double loss = 0.0;
-                for (int i = 0; i < count; i++) {
-                    loss += FrequencyMaterialRules.decibelsPerMeter(Blocks.STONE.defaultBlockState());
-                }
-
-                blackhole = loss;
-            };
-
-            Runnable combined = () -> {
-                double loss = 0.0;
-                for (int i = 0; i < count; i++) {
-                    loss += FrequencyMaterialRules.decibelsPerMeter(world.level.getBlockState(pos));
-                }
-
-                blackhole = loss;
-            };
-
-            Measurement chunks = measure(chunkLookup, count, memory);
-            Measurement blocks = measure(blockLookup, count, memory);
-            Measurement rules = measure(classification, count, memory);
-            Measurement both = measure(combined, count, memory);
-
-            assertTrue(Double.isFinite(blackhole));
-
-            System.out.printf(Locale.ROOT, "[FREQ-MATERIAL-OPS] count=%d " + "chunk=%.3f us/%.1f B " + "block=%.3f us/%.1f B " + "rules=%.3f us/%.1f B " + "combined=%.3f us/%.1f B%n", count, chunks.micros(), chunks.bytes(), blocks.micros(), blocks.bytes(), rules.micros(), rules.bytes(), both.micros(), both.bytes());
-        }
-    }
-
-    @Test
-    void profileTraversalArithmeticVersusWorldAccess() {
-        World world = new World();
-        world.terrain = Terrain.LOADED;
-
+        FrequencyMaterialRules.replaceOverrides(java.util.List.of());
         FrequencyMaterialAttenuation.setEnabled(true);
         FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
 
         com.sun.management.ThreadMXBean memory = memoryBean();
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
-        for (int count : new int[]{1_000, 5_000}) {
-            Runnable arithmetic = () -> {
-                double checksum = 0.0;
+        for (int count : new int[]{100, 1_000}) {
+            for (int scenario = 0; scenario < names.length; scenario++) {
+                mode[0] = scenario;
 
-                for (int i = 0; i < count; i++) {
-                    double dx = END.x - START.x;
-                    double distance = Math.abs(dx);
-                    double step = 1.0 / dx;
+                double expected = scenario == 2 ? FrequencyMaterialRules.amplitudeFactor(384.0) : 1.0;
+                double actual = FrequencyMaterialAttenuation.factor(level, start, end);
+                assertEquals(expected, actual, 1.0e-12);
 
-                    int x = (int) Math.floor(START.x);
-                    double tx = (x + 1.0 - START.x) * step;
-                    double previous = 0.0;
-                    double loss = 0.0;
+                Runnable operation = () -> {
+                    double sum = 0.0;
 
-                    while (previous < 1.0) {
-                        double next = Math.min(1.0, tx);
-
-                        loss += 3.0 * distance * (next - previous);
-                        previous = next;
-                        if (next >= 1.0) {
-                            break;
-                        }
-
-                        x++;
-                        tx += step;
+                    for (int i = 0; i < count; i++) {
+                        sum += FrequencyMaterialAttenuation.factor(level, start, end);
                     }
 
-                    checksum += FrequencyMaterialRules.amplitudeFactor(loss);
-                }
+                    blackhole = sum;
+                };
 
-                blackhole = checksum;
-            };
+                Measurement result = measure(operation, count, memory);
+                assertTrue(Double.isFinite(blackhole));
 
-            Runnable worldAccess = () -> {
-                double checksum = 0.0;
-
-                for (int i = 0; i < count; i++) {
-                    for (int cx = 0; cx <= 2; cx++) {
-                        world.level.hasChunk(cx, 0);
-                    }
-
-                    for (int x = 15; x <= 32; x++) {
-                        pos.set(x, 64, 0);
-
-                        checksum += FrequencyMaterialRules.decibelsPerMeter(world.level.getBlockState(pos));
-                    }
-                }
-
-                blackhole = checksum;
-            };
-
-            Runnable fullTraversal = () -> {
-                double checksum = 0.0;
-
-                for (int i = 0; i < count; i++) {
-                    checksum += FrequencyMaterialAttenuation.factor(world.level, START, END);
-                }
-
-                blackhole = checksum;
-            };
-
-            Measurement math = measure(arithmetic, count, memory);
-            Measurement access = measure(worldAccess, count, memory);
-            Measurement full = measure(fullTraversal, count, memory);
-
-            assertTrue(Double.isFinite(blackhole));
-
-            System.out.printf(Locale.ROOT, "[FREQ-MATERIAL-DDA] count=%d " + "math=%.3f us/%.1f B " + "world=%.3f us/%.1f B " + "full=%.3f us/%.1f B%n", count, math.micros(), math.bytes(), access.micros(), access.bytes(), full.micros(), full.bytes());
+                System.out.printf(Locale.ROOT, "[FREQ-EMPTY-SECTION] count=%d scenario=%s " + "us/path=%.3f bytes/path=%.1f%n", count, names[scenario], result.micros(), result.bytes());
+            }
         }
     }
 }

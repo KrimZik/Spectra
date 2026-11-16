@@ -1,8 +1,10 @@
 package com.krimzik.spectra.api.material;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,14 +20,20 @@ import static org.mockito.Mockito.*;
 class FrequencyMaterialGeometryTest {
     private static final double EPSILON = 1.0e-10;
     private ServerLevel level;
+    private ServerChunkCache chunkSource;
+    private LevelChunk chunk;
 
     @BeforeEach
     void setup() {
         level = mock(ServerLevel.class);
 
+        chunkSource = mock(ServerChunkCache.class);
+        chunk = mock(LevelChunk.class);
+        when(level.getChunkSource()).thenReturn(chunkSource);
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenReturn(chunk);
+
         when(level.getMinBuildHeight()).thenReturn(-64);
         when(level.getMaxBuildHeight()).thenReturn(320);
-        when(level.hasChunk(anyInt(), anyInt())).thenReturn(true);
 
         FrequencyMaterialRules.replaceOverrides(List.of());
         FrequencyMaterialAttenuation.setEnabled(true);
@@ -40,7 +48,7 @@ class FrequencyMaterialGeometryTest {
     }
 
     private void materials(Predicate<BlockPos> stone) {
-        when(level.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
             BlockPos pos = call.getArgument(0);
             return stone.test(pos) ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
         });
@@ -111,11 +119,11 @@ class FrequencyMaterialGeometryTest {
 
     @Test
     void unloadedGapPreservesBothLoadedEndpointMaterials() {
-        when(level.hasChunk(anyInt(), anyInt())).thenAnswer(call -> {
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
             int chunkX = call.getArgument(0);
             int chunkZ = call.getArgument(1);
 
-            return chunkZ == 0 && (chunkX == 0 || chunkX == 2);
+            return chunkZ == 0 && (chunkX == 0 || chunkX == 2) ? chunk : null;
         });
 
         materials(pos -> {
@@ -139,5 +147,44 @@ class FrequencyMaterialGeometryTest {
 
         assertLoss(1.5, inside, outside);
         assertLoss(1.5, outside, inside);
+    }
+
+    @Test
+    void primitiveCoordinatesMatchVec3Traversal() {
+        materials(pos -> pos.getX() == 15 || pos.getX() == 16 || pos.getX() == 18);
+
+        Vec3 start = new Vec3(14.25, 64.25, 0.5);
+        Vec3 end = new Vec3(19.75, 66.75, 0.5);
+
+        double objectResult = FrequencyMaterialAttenuation.factor(level, start, end);
+        double primitiveResult = FrequencyMaterialAttenuation.factor(level, start.x, start.y, start.z, end.x, end.y, end.z);
+
+        assertEquals(objectResult, primitiveResult, 0.0);
+
+        double reverseObject = FrequencyMaterialAttenuation.factor(level, end, start);
+        double reversePrimitive = FrequencyMaterialAttenuation.factor(level, end.x, end.y, end.z, start.x, start.y, start.z);
+
+        assertEquals(reverseObject, reversePrimitive, 0.0);
+    }
+
+    @Test
+    void loadedChunkIsResolvedOnceUntilCrossingBoundary() {
+        materials(pos -> false);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(10.5, 64.5, 0.5);
+
+        assertLoss(0.0, start, end);
+
+        verify(chunkSource, times(1)).getChunkNow(0, 0);
+        verify(chunk, times(11)).getBlockState(any(BlockPos.class));
+
+        clearInvocations(chunkSource, chunk);
+
+        assertLoss(0.0, new Vec3(15.5, 64.5, 0.5), new Vec3(16.5, 64.5, 0.5));
+
+        verify(chunkSource, times(1)).getChunkNow(0, 0);
+        verify(chunkSource, times(1)).getChunkNow(1, 0);
+        verify(chunk, times(2)).getBlockState(any(BlockPos.class));
     }
 }

@@ -1,7 +1,10 @@
 package com.krimzik.spectra.api.material;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Objects;
@@ -35,17 +38,22 @@ public final class FrequencyMaterialAttenuation {
     }
 
     public static double factor(ServerLevel level, Vec3 start, Vec3 end) {
-        Objects.requireNonNull(level);
         Objects.requireNonNull(start);
         Objects.requireNonNull(end);
+
+        return factor(level, start.x, start.y, start.z, end.x, end.y, end.z);
+    }
+
+    static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ) {
+        Objects.requireNonNull(level);
 
         if (!enabled) {
             return 1.0;
         }
 
-        double dx = end.x - start.x;
-        double dy = end.y - start.y;
-        double dz = end.z - start.z;
+        double dx = endX - startX;
+        double dy = endY - startY;
+        double dz = endZ - startZ;
         double distance = Math.hypot(Math.hypot(dx, dy), dz);
 
         if (!(distance > 0.0) || !Double.isFinite(distance)) {
@@ -56,13 +64,20 @@ public final class FrequencyMaterialAttenuation {
         int sy = Double.compare(dy, 0.0);
         int sz = Double.compare(dz, 0.0);
 
-        int x = (int) Math.floor(start.x);
-        int y = (int) Math.floor(start.y);
-        int z = (int) Math.floor(start.z);
+        int x = (int) Math.floor(startX);
+        int y = (int) Math.floor(startY);
+        int z = (int) Math.floor(startZ);
 
         int cachedChunkX = Integer.MIN_VALUE;
         int cachedChunkZ = Integer.MIN_VALUE;
-        boolean chunkLoaded = false;
+
+        ServerChunkCache chunkSource = level.getChunkSource();
+        LevelChunk chunk = null;
+        LevelChunkSection[] sections = null;
+
+        int cachedSectionY = Integer.MIN_VALUE;
+        boolean emptySection = false;
+        boolean skipAirSections = FrequencyMaterialRules.canSkipAirSections();
 
         double t = 0.0;
         double loss = 0.0;
@@ -80,12 +95,14 @@ public final class FrequencyMaterialAttenuation {
             if (chunkX != cachedChunkX || chunkZ != cachedChunkZ) {
                 cachedChunkX = chunkX;
                 cachedChunkZ = chunkZ;
-                chunkLoaded = level.hasChunk(chunkX, chunkZ);
+                chunk = chunkSource.getChunkNow(chunkX, chunkZ);
+                sections = chunk == null || !skipAirSections ? null : chunk.getSections();
+                cachedSectionY = Integer.MIN_VALUE;
             }
 
-            if (!chunkLoaded) {
-                double tx = sx > 0 ? (((long) chunkX + 1L) * 16.0 - start.x) / dx : sx < 0 ? ((long) chunkX * 16.0 - start.x) / dx : Double.POSITIVE_INFINITY;
-                double tz = sz > 0 ? (((long) chunkZ + 1L) * 16.0 - start.z) / dz : sz < 0 ? ((long) chunkZ * 16.0 - start.z) / dz : Double.POSITIVE_INFINITY;
+            if (chunk == null) {
+                double tx = sx > 0 ? (((long) chunkX + 1L) * 16.0 - startX) / dx : sx < 0 ? ((long) chunkX * 16.0 - startX) / dx : Double.POSITIVE_INFINITY;
+                double tz = sz > 0 ? (((long) chunkZ + 1L) * 16.0 - startZ) / dz : sz < 0 ? ((long) chunkZ * 16.0 - startZ) / dz : Double.POSITIVE_INFINITY;
 
                 double next = Math.min(1.0, Math.min(tx, tz));
                 if (next >= 1.0) {
@@ -102,19 +119,19 @@ public final class FrequencyMaterialAttenuation {
                 if (crossX) {
                     x = sx > 0 ? (chunkX + 1) << 4 : (chunkX << 4) - 1;
                 } else if (sx != 0) {
-                    double px = Math.fma(dx, next, start.x);
+                    double px = Math.fma(dx, next, startX);
                     x = (int) Math.floor(Math.nextAfter(px, sx > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
                 }
 
                 if (crossZ) {
                     z = sz > 0 ? (chunkZ + 1) << 4 : (chunkZ << 4) - 1;
                 } else if (sz != 0) {
-                    double pz = Math.fma(dz, next, start.z);
+                    double pz = Math.fma(dz, next, startZ);
                     z = (int) Math.floor(Math.nextAfter(pz, sz > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
                 }
 
                 if (sy != 0) {
-                    double py = Math.fma(dy, next, start.y);
+                    double py = Math.fma(dy, next, startY);
                     y = (int) Math.floor(Math.nextAfter(py, sy > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
                 }
 
@@ -128,9 +145,9 @@ public final class FrequencyMaterialAttenuation {
                 continue;
             }
 
-            double tx = sx > 0 ? (x + 1.0 - start.x) / dx : sx < 0 ? (x - start.x) / dx : Double.POSITIVE_INFINITY;
-            double ty = sy > 0 ? (y + 1.0 - start.y) / dy : sy < 0 ? (y - start.y) / dy : Double.POSITIVE_INFINITY;
-            double tz = sz > 0 ? (z + 1.0 - start.z) / dz : sz < 0 ? (z - start.z) / dz : Double.POSITIVE_INFINITY;
+            double tx = sx > 0 ? (x + 1.0 - startX) / dx : sx < 0 ? (x - startX) / dx : Double.POSITIVE_INFINITY;
+            double ty = sy > 0 ? (y + 1.0 - startY) / dy : sy < 0 ? (y - startY) / dy : Double.POSITIVE_INFINITY;
+            double tz = sz > 0 ? (z + 1.0 - startZ) / dz : sz < 0 ? (z - startZ) / dz : Double.POSITIVE_INFINITY;
             double next = Math.min(1.0, Math.min(tx, Math.min(ty, tz)));
 
             if (next < t || !Double.isFinite(next)) {
@@ -138,10 +155,20 @@ public final class FrequencyMaterialAttenuation {
             }
 
             if (y >= minY && y < maxY && next > t) {
-                pos.set(x, y, z);
+                int sectionY = y >> 4;
 
-                double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(level.getBlockState(pos));
-                loss = Math.fma(lossPerMeter, distance * (next - t), loss);
+                if (sectionY != cachedSectionY) {
+                    cachedSectionY = sectionY;
+                    int index = sectionY - (minY >> 4);
+
+                    emptySection = sections != null && index >= 0 && index < sections.length && sections[index] != null && sections[index].hasOnlyAir();
+                }
+
+                if (!emptySection) {
+                    pos.set(x, y, z);
+                    double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(chunk.getBlockState(pos));
+                    loss = Math.fma(lossPerMeter, distance * (next - t), loss);
+                }
             }
 
             remaining--;

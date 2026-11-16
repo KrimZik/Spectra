@@ -1,10 +1,7 @@
 package com.krimzik.spectra;
 
 import com.krimzik.spectra.api.FrequencyApi;
-import com.krimzik.spectra.dev.FrequencyBlockStressDiagnostic;
-import com.krimzik.spectra.dev.FrequencyDevTransmitter;
-import com.krimzik.spectra.dev.FrequencyEmitterLifecycleDiagnostic;
-import com.krimzik.spectra.dev.FrequencyMotionDiagnostic;
+import com.krimzik.spectra.dev.*;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
@@ -22,6 +19,7 @@ public final class spectra {
             FrequencyMotionDiagnostic.install();
             FrequencyEmitterLifecycleDiagnostic.install();
             FrequencyBlockStressDiagnostic.install();
+            FrequencyMaterialBenchmarkDiagnostic.install();
         }
     }
 }

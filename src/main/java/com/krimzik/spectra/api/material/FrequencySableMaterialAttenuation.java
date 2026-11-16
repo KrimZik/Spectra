@@ -7,6 +7,7 @@ import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3d;
 
 import java.util.Objects;
 
@@ -34,32 +35,105 @@ public final class FrequencySableMaterialAttenuation {
         return factorForSublevels(level, start, end, SableCompanion.INSTANCE.getAllIntersecting(level, query));
     }
 
+
     static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, Iterable<? extends SubLevelAccess> sublevels) {
         if (!FrequencyMaterialAttenuation.enabled() || start.equals(end)) {
             return 1.0;
         }
 
+        double dx = end.x - start.x;
+        double dy = end.y - start.y;
+        double dz = end.z - start.z;
         double result = 1.0;
-        double[] interval = null;
+        Vector3d scratch = null;
 
         for (SubLevelAccess sublevel : sublevels) {
-            if (interval == null) {
-                interval = new double[2];
+            BoundingBox3dc bounds = sublevel.boundingBox();
+
+            double enter = 0.0;
+            double exit = 1.0;
+
+            if (dx == 0.0) {
+                if (start.x < bounds.minX() || start.x > bounds.maxX()) {
+                    continue;
+                }
+            } else {
+                double a = (bounds.minX() - start.x) / dx;
+                double b = (bounds.maxX() - start.x) / dx;
+                enter = Math.max(enter, Math.min(a, b));
+                exit = Math.min(exit, Math.max(a, b));
+                if (enter >= exit) {
+                    continue;
+                }
             }
 
-            if (!intersection(start, end, sublevel.boundingBox(), interval)) {
+            if (dy == 0.0) {
+                if (start.y < bounds.minY() || start.y > bounds.maxY()) {
+                    continue;
+                }
+            } else {
+                double a = (bounds.minY() - start.y) / dy;
+                double b = (bounds.maxY() - start.y) / dy;
+                enter = Math.max(enter, Math.min(a, b));
+                exit = Math.min(exit, Math.max(a, b));
+                if (enter >= exit) {
+                    continue;
+                }
+            }
+
+            if (dz == 0.0) {
+                if (start.z < bounds.minZ() || start.z > bounds.maxZ()) {
+                    continue;
+                }
+            } else {
+                double a = (bounds.minZ() - start.z) / dz;
+                double b = (bounds.maxZ() - start.z) / dz;
+                enter = Math.max(enter, Math.min(a, b));
+                exit = Math.min(exit, Math.max(a, b));
+                if (enter >= exit) {
+                    continue;
+                }
+            }
+
+            if (enter >= exit) {
                 continue;
             }
 
-            Vec3 worldStart = start.lerp(end, interval[0]);
-            Vec3 worldEnd = start.lerp(end, interval[1]);
+            if (scratch == null) {
+                scratch = new Vector3d();
+            }
 
             Pose3dc pose = sublevel.logicalPose();
 
-            Vec3 localStart = pose.transformPositionInverse(worldStart);
-            Vec3 localEnd = pose.transformPositionInverse(worldEnd);
+            scratch.set(
+                    Math.fma(dx, enter, start.x),
+                    Math.fma(dy, enter, start.y),
+                    Math.fma(dz, enter, start.z)
+            );
 
-            double localFactor = FrequencyMaterialAttenuation.factor(level, localStart, localEnd);
+            pose.transformPositionInverse(scratch);
+
+            double localStartX = scratch.x;
+            double localStartY = scratch.y;
+            double localStartZ = scratch.z;
+
+            scratch.set(
+                    Math.fma(dx, exit, start.x),
+                    Math.fma(dy, exit, start.y),
+                    Math.fma(dz, exit, start.z)
+            );
+
+            pose.transformPositionInverse(scratch);
+
+            double localEndX = scratch.x;
+            double localEndY = scratch.y;
+            double localEndZ = scratch.z;
+
+            double localFactor = FrequencyMaterialAttenuation.factor(
+                    level,
+                    localStartX, localStartY, localStartZ,
+                    localEndX, localEndY, localEndZ);
+
             if (localFactor >= 1.0) {
                 continue;
             }
@@ -68,8 +142,12 @@ public final class FrequencySableMaterialAttenuation {
             if (scale.x() == 1.0 && scale.y() == 1.0 && scale.z() == 1.0) {
                 result *= localFactor;
             } else {
-                double localDistance = localStart.distanceTo(localEnd);
-                double worldDistance = worldStart.distanceTo(worldEnd);
+                double localDx = localEndX - localStartX;
+                double localDy = localEndY - localStartY;
+                double localDz = localEndZ - localStartZ;
+
+                double localDistance = Math.hypot(Math.hypot(localDx, localDy), localDz);
+                double worldDistance = Math.hypot(Math.hypot(dx, dy), dz) * (exit - enter);
 
                 if (localDistance > 0.0 && Double.isFinite(localDistance) && Double.isFinite(worldDistance)) {
                     result *= Math.pow(localFactor, worldDistance / localDistance);

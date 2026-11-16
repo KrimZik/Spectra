@@ -130,134 +130,125 @@ class FrequencyEngineQueryBenchmarkTest {
         when(level.getServer()).thenReturn(server);
         when(server.isSameThread()).thenReturn(true);
 
-        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
+            space.when(() -> FrequencySpace.worldPosition(eq(level), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
 
-        if (memory != null && !memory.isThreadAllocatedMemoryEnabled()) {
-            memory.setThreadAllocatedMemoryEnabled(true);
-        }
+            com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
 
-        long threadId = Thread.currentThread().threadId();
-        double range = 128.0;
+            if (memory != null && !memory.isThreadAllocatedMemoryEnabled()) {
+                memory.setThreadAllocatedMemoryEnabled(true);
+            }
 
-        for (int emitterCount : new int[]{1_000, 5_000, 10_000}) {
-            for (Scenario scenario : Scenario.values()) {
-                FrequencyEngine engine = new FrequencyEngine(level);
+            long threadId = Thread.currentThread().threadId();
+            double range = 128.0;
 
-                boolean distinct = scenario != Scenario.SHARED;
-                double tolerance = scenario == Scenario.DISTINCT_ALL ? emitterCount - 1.0 : 0.0;
+            for (int emitterCount : new int[]{1_000, 5_000, 10_000}) {
+                for (Scenario scenario : Scenario.values()) {
+                    FrequencyEngine engine = new FrequencyEngine(level);
 
-                for (int i = 0; i < emitterCount; i++) {
-                    boolean nearby = i % 10 == 0;
-                    int nearIndex = i / 10;
+                    boolean distinct = scenario != Scenario.SHARED;
+                    double tolerance = scenario == Scenario.DISTINCT_ALL ? emitterCount - 1.0 : 0.0;
 
-                    Vec3 position = nearby ? new Vec3(5 + nearIndex % 16, 0, 5 + (nearIndex / 16) % 16) : new Vec3(2048 + i % 31, 0, 2048 + i % 29);
-                    double hz = BASE_HZ + (distinct ? i : 0);
-                    engine.register(new Emitter(position, new FrequencySignal(hz, 1.0, 0.0, 343.0)));
-                }
+                    for (int i = 0; i < emitterCount; i++) {
+                        boolean nearby = i % 10 == 0;
+                        int nearIndex = i / 10;
 
-                int expectedNearby = scenario == Scenario.DISTINCT_NARROW ? 1 : emitterCount / 10;
-                for (int receiverCount : new int[]{1, 10, 50}) {
-                    Receiver[] receivers = new Receiver[receiverCount];
-                    for (int i = 0; i < receiverCount; i++) {
-                        receivers[i] = new Receiver(BASE_HZ, tolerance, new Vec3((i % 5) * 3.0, 0.0, (i / 5) * 3.0));
+                        Vec3 position = nearby ? new Vec3(5 + nearIndex % 16, 0, 5 + (nearIndex / 16) % 16) : new Vec3(2048 + i % 31, 0, 2048 + i % 29);
+                        double hz = BASE_HZ + (distinct ? i : 0);
+                        engine.register(new Emitter(position, new FrequencySignal(hz, 1.0, 0.0, 343.0)));
                     }
 
-                    int[] hits = {0};
-                    engine.forEachMatching(receivers[0], (emitter, signal) -> {
-                        double distanceSquared = emitter.position().distanceToSqr(receivers[0].position());
-                        if (distanceSquared <= range * range) {
-                            hits[0]++;
-                        }
-                    });
-                    assertEquals(expectedNearby, hits[0]);
-
-                    for (Stage stage : new Stage[]{Stage.LOOKUP, Stage.SPATIAL, Stage.RECEPTION}) {
-                        double[] sink = {0.0};
-
-                        BiConsumer<FrequencyEmitter, FrequencySignal> lookup = (emitter, signal) -> sink[0]++;
-                        FrequencyMatchConsumer spatial = (emitter, signal, distanceSquared) -> sink[0]++;
-                        FrequencyReceptionConsumer reception = (emitter, signal, distanceSquared, amplitude, travelTime) -> sink[0] += amplitude + travelTime;
-
-                        Runnable[] queries = new Runnable[receiverCount];
-
+                    int expectedNearby = scenario == Scenario.DISTINCT_NARROW ? 1 : emitterCount / 10;
+                    for (int receiverCount : new int[]{1, 10, 50}) {
+                        Receiver[] receivers = new Receiver[receiverCount];
                         for (int i = 0; i < receiverCount; i++) {
-                            Receiver receiver = receivers[i];
-
-                            queries[i] = switch (stage) {
-                                case LOOKUP -> () -> engine.forEachMatching(receiver, lookup);
-                                case SPATIAL -> () -> engine.forEachMatching(receiver, (emitter, signal) -> {
-                                    double distanceSquared = emitter.position().distanceToSqr(receiver.position());
-
-                                    if (distanceSquared <= range * range) {
-                                        spatial.accept(emitter, signal, distanceSquared);
-                                    }
-                                });
-
-                                case RECEPTION -> () -> engine.forEachMatching(receiver, (emitter, signal) -> {
-                                    double distanceSquared = emitter.position().distanceToSqr(receiver.position());
-                                    if (distanceSquared <= range * range) {
-                                        double distance = Math.sqrt(distanceSquared);
-                                        double amplitude = com.krimzik.spectra.math.FrequencyPropagation.amplitudeAtDistance(signal.amplitude(), distance);
-                                        double travelTime = com.krimzik.spectra.math.FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());
-
-                                        reception.accept(emitter, signal, distanceSquared, amplitude, travelTime);
-                                    }
-                                });
-
-                                default -> throw new AssertionError(stage);
-                            };
+                            receivers[i] = new Receiver(BASE_HZ, tolerance, new Vec3((i % 5) * 3.0, 0.0, (i / 5) * 3.0));
                         }
 
-                        for (int warmup = 0; warmup < 10; warmup++) {
-                            for (Runnable query : queries) {
-                                query.run();
+                        int[] spatialHits = {0};
+                        engine.forEachMatchingInRange(receivers[0], range, (emitter, signal, distanceSquared) -> spatialHits[0]++);
+                        assertEquals(expectedNearby, spatialHits[0]);
+
+                        int[] receptionHits = {0};
+                        engine.forEachReceivedInRange(receivers[0], range, (emitter, signal, distanceSquared, amplitude, travelTime) -> receptionHits[0]++);
+                        assertEquals(expectedNearby, receptionHits[0]);
+                        space.clearInvocations();
+
+                        for (Stage stage : new Stage[]{Stage.LOOKUP, Stage.SPATIAL, Stage.RECEPTION}) {
+                            double[] sink = {0.0};
+
+                            BiConsumer<FrequencyEmitter, FrequencySignal> lookup = (emitter, signal) -> sink[0]++;
+                            FrequencyMatchConsumer spatial = (emitter, signal, distanceSquared) -> sink[0]++;
+                            FrequencyReceptionConsumer reception = (emitter, signal, distanceSquared, amplitude, travelTime) -> sink[0] += amplitude + travelTime;
+
+                            Runnable[] queries = new Runnable[receiverCount];
+
+                            for (int i = 0; i < receiverCount; i++) {
+                                Receiver receiver = receivers[i];
+
+                                queries[i] = switch (stage) {
+                                    case LOOKUP -> () -> engine.forEachMatching(receiver, lookup);
+                                    case SPATIAL -> () -> engine.forEachMatchingInRange(receiver, range, spatial);
+                                    case RECEPTION -> () -> engine.forEachReceivedInRange(receiver, range, reception);
+
+                                    default -> throw new AssertionError(stage);
+                                };
                             }
-                        }
 
-                        int batches = Math.max(2, 100 / receiverCount);
-                        double[] timings = new double[5];
-                        long allocated = 0L;
-
-                        for (int sample = 0; sample < timings.length; sample++) {
-                            long bytesBefore = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
-                            long start = System.nanoTime();
-
-                            for (int batch = 0; batch < batches; batch++) {
+                            for (int warmup = 0; warmup < 10; warmup++) {
                                 for (Runnable query : queries) {
                                     query.run();
+                                    space.clearInvocations();
                                 }
                             }
 
-                            long elapsed = System.nanoTime() - start;
-                            long bytesAfter = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+                            int batches = Math.max(2, 100 / receiverCount);
+                            double[] timings = new double[5];
+                            long allocated = 0L;
 
-                            int queryCount = batches * receiverCount;
-                            timings[sample] = elapsed / (queryCount * 1000.0);
+                            for (int sample = 0; sample < timings.length; sample++) {
+                                long elapsed = 0L;
 
-                            if (memory != null) {
-                                allocated += bytesAfter - bytesBefore;
+                                for (int batch = 0; batch < batches; batch++) {
+                                    for (Runnable query : queries) {
+                                        long bytesBefore = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+
+                                        long start = System.nanoTime();
+                                        query.run();
+                                        elapsed += System.nanoTime() - start;
+
+                                        if (memory != null) {
+                                            allocated += memory.getThreadAllocatedBytes(threadId) - bytesBefore;
+                                        }
+
+                                        space.clearInvocations();
+                                    }
+                                }
+
+                                int queryCount = batches * receiverCount;
+                                timings[sample] = elapsed / (queryCount * 1000.0);
                             }
+
+                            Arrays.sort(timings);
+                            blackhole = sink[0];
+                            assertTrue(Double.isFinite(blackhole));
+
+                            double bytesPerQuery = memory == null ? -1.0 : allocated / (double) (timings.length * batches * receiverCount);
+                            System.out.printf(
+                                    Locale.ROOT,
+                                    "[FREQ] emitters=%d scenario=%s " + "nearby=%d receivers=%d stage=%s " + "median=%.3f us/query " + "allocated=%.1f bytes/query%n",
+                                    emitterCount,
+                                    scenario,
+                                    expectedNearby,
+                                    receiverCount,
+                                    stage,
+                                    timings[2],
+                                    bytesPerQuery);
                         }
-
-                        Arrays.sort(timings);
-                        blackhole = sink[0];
-                        assertTrue(Double.isFinite(blackhole));
-
-                        double bytesPerQuery = memory == null ? -1.0 : allocated / (double) (timings.length * batches * receiverCount);
-                        System.out.printf(
-                                Locale.ROOT,
-                                "[FREQ] emitters=%d scenario=%s " + "nearby=%d receivers=%d stage=%s " + "median=%.3f us/query " + "allocated=%.1f bytes/query%n",
-                                emitterCount,
-                                scenario,
-                                expectedNearby,
-                                receiverCount,
-                                stage,
-                                timings[2],
-                                bytesPerQuery);
                     }
-                }
 
-                engine.shutdown();
+                    engine.shutdown();
+                }
             }
         }
     }

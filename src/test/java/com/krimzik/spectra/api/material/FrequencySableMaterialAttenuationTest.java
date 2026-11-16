@@ -4,8 +4,10 @@ import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.Test;
 
@@ -77,14 +79,16 @@ class FrequencySableMaterialAttenuationTest {
 
     private static ServerLevel materialWorld() {
         ServerLevel level = mock(ServerLevel.class);
+        ServerChunkCache chunkSource = mock(ServerChunkCache.class);
+        LevelChunk chunk = mock(LevelChunk.class);
 
         when(level.getMinBuildHeight()).thenReturn(-64);
         when(level.getMaxBuildHeight()).thenReturn(320);
-        when(level.hasChunk(anyInt(), anyInt())).thenReturn(true);
+        when(level.getChunkSource()).thenReturn(chunkSource);
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenReturn(chunk);
 
-        when(level.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
             BlockPos pos = call.getArgument(0);
-
             return pos.getX() == 1000 || pos.getX() == 1001 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
         });
 
@@ -156,7 +160,7 @@ class FrequencySableMaterialAttenuationTest {
         try {
             double factor = FrequencySableMaterialAttenuation.factorForSublevels(level, new Vec3(9.5, 70.5, 0.5), new Vec3(12.5, 70.5, 0.5), List.of(sublevel));
             assertEquals(1.0, factor, 0.0);
-            verify(level, never()).getBlockState(any(BlockPos.class));
+            verify(level.getChunkSource(), never()).getChunkNow(anyInt(), anyInt());
         } finally {
             FrequencyMaterialAttenuation.setEnabled(false);
         }

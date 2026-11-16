@@ -29,6 +29,10 @@ public final class FrequencyMaterialRules {
 
     private FrequencyMaterialRules() {}
 
+    static boolean canSkipAirSections() {
+        return overrides.isEmpty();
+    }
+
     public static Rule block(ResourceLocation id, double loss) {
         return new Rule(Objects.requireNonNull(id), null, loss);
     }
