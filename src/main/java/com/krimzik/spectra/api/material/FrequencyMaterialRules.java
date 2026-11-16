@@ -4,9 +4,11 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.List;
@@ -26,8 +28,27 @@ public final class FrequencyMaterialRules {
     }
 
     private static volatile List<Rule> overrides = List.of();
+    private static volatile double airLossDbPerMeter;
+    private static volatile double waterLossDbPerMeter = 0.5;
 
     private FrequencyMaterialRules() {}
+
+    public static void setEnvironmentLoss(double air, double water) {
+        if (!Double.isFinite(air) || air < 0.0 || !Double.isFinite(water) || water < 0.0) {
+            throw new IllegalArgumentException("Invalid environmental attenuation");
+        }
+
+        airLossDbPerMeter = air;
+        waterLossDbPerMeter = water;
+    }
+
+    public static double airLossDbPerMeter() {
+        return airLossDbPerMeter;
+    }
+
+    public static double waterLossDbPerMeter() {
+        return waterLossDbPerMeter;
+    }
 
     static boolean canSkipAirSections() {
         return overrides.isEmpty();
@@ -61,7 +82,10 @@ public final class FrequencyMaterialRules {
             }
         }
 
-        if (state.isAir()) return 0.0;
+        if (state.isAir()) return airLossDbPerMeter;
+        if (state.getFluidState().is(FluidTags.WATER) && (state.getBlock() instanceof LiquidBlock || state.is(Blocks.BUBBLE_COLUMN))) {
+            return waterLossDbPerMeter;
+        }
         if (state.is(BlockTags.WOOL)) return 4.0;
         if (state.is(BlockTags.LEAVES)) return 0.2;
         if (state.is(BlockTags.LOGS)) return 1.5;

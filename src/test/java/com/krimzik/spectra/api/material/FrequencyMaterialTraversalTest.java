@@ -35,14 +35,13 @@ class FrequencyMaterialTraversalTest {
         when(level.getMaxBuildHeight()).thenReturn(320);
 
         FrequencyMaterialRules.replaceOverrides(java.util.List.of());
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
         FrequencyMaterialAttenuation.setEnabled(true);
     }
 
     @AfterEach
     void cleanup() {
         FrequencyMaterialAttenuation.setEnabled(false);
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialRules.replaceOverrides(java.util.List.of());
     }
 
@@ -94,17 +93,6 @@ class FrequencyMaterialTraversalTest {
     }
 
     @Test
-    void workBudgetRetainsPartialMaterialLoss() {
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(4);
-        when(chunk.getBlockState(any(BlockPos.class))).thenReturn(Blocks.STONE.defaultBlockState());
-
-        double result = FrequencyMaterialAttenuation.factor(level, new Vec3(0.5, 64.5, 0.5), new Vec3(10.5, 64.5, 0.5));
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(10.5), result, 1.0e-12);
-
-        verify(chunk, times(4)).getBlockState(any(BlockPos.class));
-    }
-
-    @Test
     void disabledAttenuationDoesNotAccessTerrain() {
         FrequencyMaterialAttenuation.setEnabled(false);
         double result = FrequencyMaterialAttenuation.factor(level, Vec3.ZERO, new Vec3(100000.0, 0.0, 0.0));
@@ -135,7 +123,7 @@ class FrequencyMaterialTraversalTest {
     }
 
     @Test
-    void traversalBudgetTruncatesMaterialBeyondItsLimit() {
+    void traversalReachesMaterialBeyondOldBudget() {
         when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
             BlockPos pos = call.getArgument(0);
             return pos.getX() == 1100 || pos.getX() == 1101 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
@@ -144,21 +132,17 @@ class FrequencyMaterialTraversalTest {
         Vec3 start = new Vec3(0.5, 64.5, 0.5);
         Vec3 end = new Vec3(1200.5, 64.5, 0.5);
 
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
-        double limited = FrequencyMaterialAttenuation.factor(level, start, end);
-        assertEquals(1.0, limited, 1.0e-12);
+        double expected = FrequencyMaterialRules.amplitudeFactor(6.0);
 
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(2048);
-        double complete = FrequencyMaterialAttenuation.factor(level, start, end);
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), complete, 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
     }
 
     @Test
-    void unloadedChunkSkippingAlsoConsumesTraversalBudget() {
+    void unloadedChunkSkippingReachesDistantLoadedMaterials() {
         when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
             int chunkX = call.getArgument(0);
             int chunkZ = call.getArgument(1);
-
             return chunkZ == 0 && (chunkX == 0 || chunkX == 1250) ? chunk : null;
         });
 
@@ -170,14 +154,10 @@ class FrequencyMaterialTraversalTest {
         Vec3 start = new Vec3(0.5, 64.5, 0.5);
         Vec3 end = new Vec3(20000.5, 64.5, 0.5);
 
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
-        double limited = FrequencyMaterialAttenuation.factor(level, start, end);
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(1.5), limited, 1.0e-10);
+        double expected = FrequencyMaterialRules.amplitudeFactor(3.0);
 
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(4096);
-        double complete = FrequencyMaterialAttenuation.factor(level, start, end);
-
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0), complete, 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
     }
 
     @Test
@@ -213,5 +193,48 @@ class FrequencyMaterialTraversalTest {
 
         verify(chunk, times(11)).getBlockState(any(BlockPos.class));
         verify(empty, never()).hasOnlyAir();
+    }
+
+
+    @Test
+    void airAndWaterUseConfiguredLossWithoutDoubleCounting() {
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+            BlockPos pos = call.getArgument(0);
+            return pos.getX() == 1 || pos.getX() == 2 ? Blocks.WATER.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(3.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(1.0);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-12);
+
+        FrequencyMaterialRules.replaceOverrides(java.util.List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:water"), 2.0)));
+        double overridden = FrequencyMaterialRules.amplitudeFactor(4.0);
+
+        assertEquals(overridden, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
+    }
+
+    @Test
+    void emptyAirSectionRetainsConfiguredEnvironmentalLoss() {
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+
+        LevelChunkSection empty = mock(LevelChunkSection.class);
+        when(empty.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = empty;
+
+        when(chunk.getSections()).thenReturn(sections);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(10.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(2.5);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
+
+        verify(chunk, never()).getBlockState(any(BlockPos.class));
     }
 }

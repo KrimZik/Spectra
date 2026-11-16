@@ -10,10 +10,7 @@ import net.minecraft.world.phys.Vec3;
 import java.util.Objects;
 
 public final class FrequencyMaterialAttenuation {
-    private static final int DEFAULT_LOADED_BLOCK_BUDGET = 1024;
-
     private static volatile boolean enabled;
-    private static volatile int loadedBlockBudget = DEFAULT_LOADED_BLOCK_BUDGET;
 
     private FrequencyMaterialAttenuation() {}
 
@@ -23,18 +20,6 @@ public final class FrequencyMaterialAttenuation {
 
     public static void setEnabled(boolean value) {
         enabled = value;
-    }
-
-    public static int loadedBlockBudget() {
-        return loadedBlockBudget;
-    }
-
-    public static void setLoadedBlockBudget(int budget) {
-        if (budget < 1 || budget > 65536) {
-            throw new IllegalArgumentException("Invalid loaded block budget");
-        }
-
-        loadedBlockBudget = budget;
     }
 
     public static double factor(ServerLevel level, Vec3 start, Vec3 end) {
@@ -82,13 +67,12 @@ public final class FrequencyMaterialAttenuation {
         double t = 0.0;
         double loss = 0.0;
 
-        int remaining = loadedBlockBudget;
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
 
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
-        while (t < 1.0 && remaining > 0) {
+        while (t < 1.0) {
             int chunkX = x >> 4;
             int chunkZ = z >> 4;
 
@@ -136,8 +120,6 @@ public final class FrequencyMaterialAttenuation {
                 }
 
                 t = next;
-                remaining--;
-
                 if (x >> 4 == chunkX && z >> 4 == chunkZ) {
                     break;
                 }
@@ -164,16 +146,17 @@ public final class FrequencyMaterialAttenuation {
                     emptySection = sections != null && index >= 0 && index < sections.length && sections[index] != null && sections[index].hasOnlyAir();
                 }
 
-                if (!emptySection) {
+                double length = distance * (next - t);
+                if (emptySection) {
+                    loss = Math.fma(FrequencyMaterialRules.airLossDbPerMeter(), length, loss);
+                } else {
                     pos.set(x, y, z);
                     double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(chunk.getBlockState(pos));
-                    loss = Math.fma(lossPerMeter, distance * (next - t), loss);
+                    loss = Math.fma(lossPerMeter, length, loss);
                 }
             }
 
-            remaining--;
             t = next;
-
             if (t >= 1.0) {
                 break;
             }

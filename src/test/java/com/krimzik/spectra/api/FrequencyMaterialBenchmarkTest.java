@@ -89,7 +89,6 @@ class FrequencyMaterialBenchmarkTest {
     @AfterEach
     void cleanup() {
         FrequencyMaterialAttenuation.setEnabled(false);
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
     }
 
     private static com.sun.management.ThreadMXBean memoryBean() {
@@ -270,7 +269,6 @@ class FrequencyMaterialBenchmarkTest {
 
         FrequencyMaterialRules.replaceOverrides(java.util.List.of());
         FrequencyMaterialAttenuation.setEnabled(true);
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
 
         com.sun.management.ThreadMXBean memory = memoryBean();
 

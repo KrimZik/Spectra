@@ -37,13 +37,11 @@ class FrequencyMaterialGeometryTest {
 
         FrequencyMaterialRules.replaceOverrides(List.of());
         FrequencyMaterialAttenuation.setEnabled(true);
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
     }
 
     @AfterEach
     void cleanup() {
         FrequencyMaterialAttenuation.setEnabled(false);
-        FrequencyMaterialAttenuation.setLoadedBlockBudget(1024);
         FrequencyMaterialRules.replaceOverrides(List.of());
     }
 

@@ -30,6 +30,7 @@ class FrequencyEngineQueryBenchmarkTest {
     private static final double WINDOW_SECONDS = 0.25;
     private static final long END_TICK = 4_000_000_001L;
     private static volatile double blackhole;
+    private static final boolean FULL_BENCHMARK = Boolean.getBoolean("spectra.fullQueryBenchmark");
 
     private enum Scenario { SHARED, DISTINCT_ALL, DISTINCT_NARROW }
     private enum Stage { LOOKUP, RAW_DISTANCE, PROJECTION_CONTROL, SPATIAL, RECEPTION, FINITE_WINDOW }
@@ -142,8 +143,11 @@ class FrequencyEngineQueryBenchmarkTest {
             long threadId = Thread.currentThread().threadId();
             double range = 128.0;
 
-            for (int emitterCount : new int[]{1_000, 5_000, 10_000}) {
-                for (Scenario scenario : Scenario.values()) {
+            int[] emitterCounts = FULL_BENCHMARK ? new int[]{1_000, 5_000, 10_000} : new int[]{1_000, 5_000};
+            Scenario[] scenarios = FULL_BENCHMARK ? Scenario.values() : new Scenario[]{Scenario.SHARED, Scenario.DISTINCT_NARROW};
+
+            for (int emitterCount : emitterCounts) {
+                for (Scenario scenario : scenarios) {
                     FrequencyEngine engine = new FrequencyEngine(level);
 
                     boolean distinct = scenario != Scenario.SHARED;
@@ -159,7 +163,7 @@ class FrequencyEngineQueryBenchmarkTest {
                     }
 
                     int expectedNearby = scenario == Scenario.DISTINCT_NARROW ? 1 : emitterCount / 10;
-                    for (int receiverCount : new int[]{1, 10, 50}) {
+                    for (int receiverCount : FULL_BENCHMARK ? new int[]{1, 10, 50} : new int[]{1}) {
                         Receiver[] receivers = new Receiver[receiverCount];
                         for (int i = 0; i < receiverCount; i++) {
                             receivers[i] = new Receiver(BASE_HZ, tolerance, new Vec3((i % 5) * 3.0, 0.0, (i / 5) * 3.0));
@@ -174,7 +178,7 @@ class FrequencyEngineQueryBenchmarkTest {
                         assertEquals(expectedNearby, receptionHits[0]);
                         space.clearInvocations();
 
-                        for (Stage stage : new Stage[]{Stage.LOOKUP, Stage.SPATIAL, Stage.RECEPTION}) {
+                        for (Stage stage : new Stage[]{Stage.LOOKUP, Stage.RAW_DISTANCE, Stage.PROJECTION_CONTROL, Stage.SPATIAL, Stage.RECEPTION}) {
                             double[] sink = {0.0};
 
                             BiConsumer<FrequencyEmitter, FrequencySignal> lookup = (emitter, signal) -> sink[0]++;
@@ -185,9 +189,21 @@ class FrequencyEngineQueryBenchmarkTest {
 
                             for (int i = 0; i < receiverCount; i++) {
                                 Receiver receiver = receivers[i];
-
                                 queries[i] = switch (stage) {
                                     case LOOKUP -> () -> engine.forEachMatching(receiver, lookup);
+                                    case RAW_DISTANCE -> () -> {
+                                        Vec3 receiverPosition = receiver.position();
+                                        engine.forEachMatching(receiver, (emitter, signal) -> sink[0] += emitter.position().distanceToSqr(receiverPosition));
+                                    };
+
+                                    case PROJECTION_CONTROL -> () -> {
+                                        Vec3 receiverWorld = FrequencySpace.worldPosition(level, receiver.position());
+                                        engine.forEachMatching(receiver, (emitter, signal) -> {
+                                            Vec3 emitterWorld = FrequencySpace.worldPosition(level, emitter.position());
+                                            sink[0] += emitterWorld.distanceToSqr(receiverWorld);
+                                        });
+                                    };
+
                                     case SPATIAL -> () -> engine.forEachMatchingInRange(receiver, range, spatial);
                                     case RECEPTION -> () -> engine.forEachReceivedInRange(receiver, range, reception);
 
@@ -195,15 +211,15 @@ class FrequencyEngineQueryBenchmarkTest {
                                 };
                             }
 
-                            for (int warmup = 0; warmup < 10; warmup++) {
+                            for (int warmup = 0; warmup < (FULL_BENCHMARK ? 10 : 2); warmup++) {
                                 for (Runnable query : queries) {
                                     query.run();
                                     space.clearInvocations();
                                 }
                             }
 
-                            int batches = Math.max(2, 100 / receiverCount);
-                            double[] timings = new double[5];
+                            int batches = FULL_BENCHMARK ? Math.max(2, 100 / receiverCount) : 3;
+                            double[] timings = new double[FULL_BENCHMARK ? 5 : 3];
                             long allocated = 0L;
 
                             for (int sample = 0; sample < timings.length; sample++) {
@@ -242,7 +258,7 @@ class FrequencyEngineQueryBenchmarkTest {
                                     expectedNearby,
                                     receiverCount,
                                     stage,
-                                    timings[2],
+                                    timings[timings.length / 2],
                                     bytesPerQuery);
                         }
                     }
