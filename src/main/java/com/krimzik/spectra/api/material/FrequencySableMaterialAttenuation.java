@@ -129,12 +129,8 @@ public final class FrequencySableMaterialAttenuation {
             double localEndY = scratch.y;
             double localEndZ = scratch.z;
 
-            double localFactor = FrequencyMaterialAttenuation.factor(
-                    level,
-                    localStartX, localStartY, localStartZ,
-                    localEndX, localEndY, localEndZ);
-
-            if (localFactor >= 1.0) {
+            double localFactor = FrequencyMaterialAttenuation.factorRelativeToAir(level, localStartX, localStartY, localStartZ, localEndX, localEndY, localEndZ);
+            if (localFactor == 1.0) {
                 continue;
             }
 

@@ -103,6 +103,14 @@ public final class FrequencyMaterialRules {
             throw new IllegalArgumentException("Invalid attenuation");
         }
 
+        return relativeAmplitudeFactor(lossDb);
+    }
+
+    static double relativeAmplitudeFactor(double lossDb) {
+        if (!Double.isFinite(lossDb)) {
+            throw new IllegalArgumentException("Invalid attenuation");
+        }
+
         return Math.exp(-0.11512925464970229 * lossDb);
     }
 }

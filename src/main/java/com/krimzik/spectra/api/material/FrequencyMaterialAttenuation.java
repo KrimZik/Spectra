@@ -3,6 +3,7 @@ package com.krimzik.spectra.api.material;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
@@ -30,6 +31,14 @@ public final class FrequencyMaterialAttenuation {
     }
 
     static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ) {
+        return factor(level, startX, startY, startZ, endX, endY, endZ, false);
+    }
+
+    static double factorRelativeToAir(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ) {
+        return factor(level, startX, startY, startZ, endX, endY, endZ, true);
+    }
+
+    private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir) {
         Objects.requireNonNull(level);
 
         if (!enabled) {
@@ -66,6 +75,7 @@ public final class FrequencyMaterialAttenuation {
 
         double t = 0.0;
         double loss = 0.0;
+        double airBaseline = relativeToAir ? FrequencyMaterialRules.decibelsPerMeter(Blocks.AIR.defaultBlockState()) : 0.0;
 
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
@@ -148,11 +158,11 @@ public final class FrequencyMaterialAttenuation {
 
                 double length = distance * (next - t);
                 if (emptySection) {
-                    loss = Math.fma(FrequencyMaterialRules.airLossDbPerMeter(), length, loss);
+                    loss = Math.fma(FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length, loss);
                 } else {
                     pos.set(x, y, z);
                     double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(chunk.getBlockState(pos));
-                    loss = Math.fma(lossPerMeter, length, loss);
+                    loss = Math.fma(lossPerMeter - airBaseline, length, loss);
                 }
             }
 
@@ -174,6 +184,6 @@ public final class FrequencyMaterialAttenuation {
             }
         }
 
-        return FrequencyMaterialRules.amplitudeFactor(loss);
+        return relativeToAir ? FrequencyMaterialRules.relativeAmplitudeFactor(loss) : FrequencyMaterialRules.amplitudeFactor(loss);
     }
 }

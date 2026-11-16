@@ -353,4 +353,55 @@ class FrequencySableMaterialAttenuationTest {
 
         assertEquals(FrequencyMaterialRules.amplitudeFactor(9.0), world * ships, 1.0e-9);
     }
+
+
+    @Test
+    void shipStoneReplacesAmbientAirLoss() {
+        ServerLevel level = materialWorld();
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(-990.0, 0.0, 0.0);
+
+        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
+
+        Vec3 start = new Vec3(9.5, 64.5, 0.5);
+        Vec3 end = new Vec3(12.5, 64.5, 0.5);
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        double worldFactor = FrequencyMaterialAttenuation.factor(level, start, end);
+        double shipFactor = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel));
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(6.25);
+
+        assertEquals(expected, worldFactor * shipFactor, 1.0e-9);
+    }
+
+
+    @Test
+    void emptyShipDoesNotDoubleCountAir() {
+        ServerLevel level = materialWorld();
+        LevelChunk chunk = level.getChunkSource().getChunkNow(0, 0);
+
+        when(chunk.getBlockState(any(BlockPos.class))).thenReturn(Blocks.AIR.defaultBlockState());
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(-990.0, 0.0, 0.0);
+
+        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
+
+        Vec3 start = new Vec3(9.5, 64.5, 0.5);
+        Vec3 end = new Vec3(12.5, 64.5, 0.5);
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        double worldFactor = FrequencyMaterialAttenuation.factor(level, start, end);
+        double shipFactor = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel));
+
+        assertEquals(1.0, shipFactor, 1.0e-12);
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(0.75), worldFactor * shipFactor, 1.0e-12);
+    }
+
 }
