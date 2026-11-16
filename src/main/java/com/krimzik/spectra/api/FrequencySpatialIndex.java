@@ -8,7 +8,7 @@ import java.util.function.Consumer;
 
 final class FrequencySpatialIndex<T> {
     private static final double CELL_METERS = 32.0;
-    private static final long MAX_ENUMERATED_CELLS = 512L;
+    private static final long MAX_ENUMERATED_CELLS = 8192L;
 
     private record Cell(int x, int y, int z) {}
 
@@ -118,7 +118,13 @@ final class FrequencySpatialIndex<T> {
             long ny = (long) y1 - y0 + 1;
             long nz = (long) z1 - z0 + 1;
 
-            if (nx > MAX_ENUMERATED_CELLS || ny > MAX_ENUMERATED_CELLS || nz > MAX_ENUMERATED_CELLS || nx * ny * nz > MAX_ENUMERATED_CELLS) {
+            if (nx > MAX_ENUMERATED_CELLS || ny > MAX_ENUMERATED_CELLS || nz > MAX_ENUMERATED_CELLS) {
+                scanAll(x, y, z, radiusMeters, consumer);
+                return;
+            }
+
+            long cellCount = nx * ny * nz;
+            if (cellCount > MAX_ENUMERATED_CELLS || cellCount * 2 >= entries.size()) {
                 scanAll(x, y, z, radiusMeters, consumer);
                 return;
             }
