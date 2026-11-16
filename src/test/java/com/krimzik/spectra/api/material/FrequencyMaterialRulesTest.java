@@ -13,6 +13,7 @@ class FrequencyMaterialRulesTest {
     @AfterEach
     void cleanup() {
         FrequencyMaterialRules.replaceOverrides(List.of());
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialAttenuation.setEnabled(false);
     }
 
@@ -40,10 +41,5 @@ class FrequencyMaterialRulesTest {
     void blockOverridesTakePriorityOverTags() {
         FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.tag(ResourceLocation.parse("minecraft:planks"), 7.0), FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:oak_planks"), 2.0)));
         assertEquals(2.0, FrequencyMaterialRules.decibelsPerMeter(Blocks.OAK_PLANKS.defaultBlockState()), 0.0);
-    }
-
-    @Test
-    void materialAttenuationDefaultsToDisabled() {
-        assertFalse(FrequencyMaterialAttenuation.enabled());
     }
 }

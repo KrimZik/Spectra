@@ -35,6 +35,7 @@ class FrequencyMaterialGeometryTest {
         when(level.getMinBuildHeight()).thenReturn(-64);
         when(level.getMaxBuildHeight()).thenReturn(320);
 
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialRules.replaceOverrides(List.of());
         FrequencyMaterialAttenuation.setEnabled(true);
     }
@@ -42,6 +43,7 @@ class FrequencyMaterialGeometryTest {
     @AfterEach
     void cleanup() {
         FrequencyMaterialAttenuation.setEnabled(false);
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialRules.replaceOverrides(List.of());
     }
 

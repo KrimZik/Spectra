@@ -23,6 +23,7 @@ class FrequencyMaterialTraversalTest {
 
     @BeforeEach
     void setup() {
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         level = mock(ServerLevel.class);
 
         chunkSource = mock(ServerChunkCache.class);
