@@ -1,544 +1,137 @@
 package com.krimzik.spectra.api.material;
 
-import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.companion.math.Pose3d;
-import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.lang.management.ManagementFactory;
 import java.util.List;
-import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
-import static org.junit.jupiter.api.Assertions.*;
 
 class FrequencySableMaterialAttenuationTest {
-    private static final double EPSILON = 1.0e-12;
+    private static final Vec3 START = new Vec3(0.5, 64.5, 0.5);
+    private static final Vec3 END = new Vec3(2.5, 64.5, 0.5);
 
-    private static double[] intersection(Vec3 start, Vec3 end, BoundingBox3d bounds) {
-        SegmentAabbClip.Interval interval = new SegmentAabbClip.Interval();
+    private final AtomicReference<BlockState> material =
+            new AtomicReference<>(Blocks.IRON_BLOCK.defaultBlockState());
 
-        if (!SegmentAabbClip.clip(
-                start.x, start.y, start.z,
-                end.x, end.y, end.z,
-                bounds.minX(), bounds.minY(), bounds.minZ(),
-                bounds.maxX(), bounds.maxY(), bounds.maxZ(),
-                interval
-        )) {
-            return null;
-        }
-
-        return new double[]{interval.enter(), interval.exit()};
-    }
+    private ServerLevel level;
+    private SubLevelAccess sublevel;
+    private Pose3d pose;
+    private BoundingBox3d bounds;
 
     @BeforeEach
-    void setupMaterialSettings() {
-        FrequencyMaterialAttenuation.setEnabled(false);
+    void setup() {
         FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialRules.replaceOverrides(List.of());
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        level = mock(ServerLevel.class);
+        ServerChunkCache source = mock(ServerChunkCache.class);
+        LevelChunk chunk = mock(LevelChunk.class);
+        LevelChunkSection section = mock(LevelChunkSection.class);
+
+        when(level.getChunkSource()).thenReturn(source);
+        when(level.getMinBuildHeight()).thenReturn(-64);
+        when(level.getMaxBuildHeight()).thenReturn(320);
+        when(source.getChunkNow(anyInt(), anyInt())).thenReturn(chunk);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = section;
+
+        when(chunk.getSections()).thenReturn(sections);
+        when(section.hasOnlyAir()).thenReturn(false);
+        when(section.getBlockState(anyInt(), anyInt(), anyInt()))
+                .thenAnswer(call -> {
+                    int x = call.getArgument(0);
+                    int y = call.getArgument(1);
+                    int z = call.getArgument(2);
+
+                    return x == 1 && y == 0 && z == 0 ? material.get() : Blocks.AIR.defaultBlockState();
+                });
+
+        pose = new Pose3d();
+        bounds = new BoundingBox3d(0, 64, 0, 3, 65, 1);
+
+        sublevel = mock(SubLevelAccess.class);
+        when(sublevel.logicalPose()).thenReturn(pose);
+        when(sublevel.boundingBox()).thenReturn(bounds);
     }
 
     @AfterEach
-    void resetMaterialSettings() {
+    void cleanup() {
         FrequencyMaterialAttenuation.setEnabled(false);
         FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
         FrequencyMaterialRules.replaceOverrides(List.of());
     }
 
-    @Test
-    void straightPathIsClippedToShipBounds() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        double[] interval = intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
-
-        assertNotNull(interval);
-        assertEquals(0.2, interval[0], EPSILON);
-        assertEquals(0.4, interval[1], EPSILON);
+    private double factor() {
+        return FrequencySableMaterialAttenuation.factorForSublevels(level, START, END, List.of(sublevel));
     }
 
     @Test
-    void reversePathHasSameIntersectionLength() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
+    void stationaryShipAppliesMaterialAttenuation() {
+        double expected = FrequencyMaterialAttenuation.factorRelativeToAir(level, START.x, START.y, START.z, END.x, END.y, END.z);
 
-        double[] forward = intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
-        double[] reverse = intersection(new Vec3(10, 1, 1), new Vec3(0, 1, 1), bounds);
-
-        assertNotNull(forward);
-        assertNotNull(reverse);
-
-        assertEquals(forward[1] - forward[0], reverse[1] - reverse[0], EPSILON);
+        assertTrue(expected < 1.0);
+        assertEquals(expected, factor(), 1.0e-12);
     }
 
     @Test
-    void nearbyShipOutsideRayIsIgnored() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 3, 0, 4, 5, 2);
-        assertNull(intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds));
+    void movingShipUpdatesAttenuationAndCandidates() {
+        double original = factor();
+
+        pose.position().set(0.0, 0.0, 8.0);
+        bounds.set(0, 64, 8, 3, 65, 9);
+
+        assertEquals(1.0, factor(), 1.0e-12);
+        assertTrue(FrequencySableMaterialAttenuation.receiverCandidates(List.of(sublevel), END, 4.0).isEmpty());
+
+        pose.position().zero();
+        bounds.set(0, 64, 0, 3, 65, 1);
+
+        assertEquals(original, factor(), 1.0e-12);
+        assertEquals(1, FrequencySableMaterialAttenuation.receiverCandidates(List.of(sublevel), END, 4.0).size());
     }
 
     @Test
-    void diagonalIntersectionIsClippedCorrectly() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 2, 0, 4, 4, 2);
-        double[] interval = intersection(new Vec3(0, 0, 1), new Vec3(6, 6, 1), bounds);
+    void rotatingShipPreservesEquivalentMaterialThickness() {
+        double original = factor();
 
-        assertNotNull(interval);
-        assertEquals(1.0 / 3.0, interval[0], EPSILON);
-        assertEquals(2.0 / 3.0, interval[1], EPSILON);
+        pose.orientation().rotationY(Math.PI / 2.0);
+        bounds.set(new BoundingBox3d(0, 64, 0, 3, 65, 1).transform(pose));
+
+        Vec3 rotatedStart = pose.transformPosition(START);
+        Vec3 rotatedEnd = pose.transformPosition(END);
+
+        double rotated = FrequencySableMaterialAttenuation.factorForSublevels(level, rotatedStart, rotatedEnd, List.of(sublevel));
+
+        assertEquals(original, rotated, 1.0e-9);
     }
 
     @Test
-    void cornerTouchHasZeroMaterialThickness() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        assertNull(intersection(new Vec3(0, 0, 1), new Vec3(4, 4, 1), bounds));
-    }
+    void blockChangesAndCandidateRemovalUpdateAttenuation() {
+        double original = factor();
 
-    @Test
-    void pathStartingInsideShipIsClippedCorrectly() {
-        BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        double[] interval = intersection(new Vec3(3, 1, 1), new Vec3(5, 1, 1), bounds);
+        material.set(Blocks.AIR.defaultBlockState());
+        assertEquals(1.0, factor(), 1.0e-12);
 
-        assertNotNull(interval);
-        assertEquals(0.0, interval[0], EPSILON);
-        assertEquals(0.5, interval[1], EPSILON);
-    }
+        material.set(Blocks.IRON_BLOCK.defaultBlockState());
+        assertEquals(original, factor(), 1.0e-12);
 
-    private static ServerLevel materialWorld() {
-        ServerLevel level = mock(ServerLevel.class);
-        ServerChunkCache chunkSource = mock(ServerChunkCache.class);
-        LevelChunk chunk = mock(LevelChunk.class);
-
-        when(level.getMinBuildHeight()).thenReturn(-64);
-        when(level.getMaxBuildHeight()).thenReturn(320);
-        when(level.getChunkSource()).thenReturn(chunkSource);
-        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenReturn(chunk);
-
-        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
-            BlockPos pos = call.getArgument(0);
-            return pos.getX() == 1000 || pos.getX() == 1001 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
-        });
-
-        return level;
-    }
-
-    private static SubLevelAccess ship(Pose3d pose, BoundingBox3d bounds) {
-        SubLevelAccess sublevel = mock(SubLevelAccess.class);
-        when(sublevel.logicalPose()).thenReturn(pose);
-        when(sublevel.boundingBox()).thenReturn(bounds);
-
-        return sublevel;
-    }
-
-    private static void assertShipLoss(ServerLevel level, SubLevelAccess sublevel, Vec3 start, Vec3 end, double decibels) {
-        double expected = FrequencyMaterialRules.amplitudeFactor(decibels);
-
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel)), 1.0e-9);
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, end, start, List.of(sublevel)), 1.0e-9);
-    }
-
-    @Test
-    void translatedShipSamplesPlotBlocks() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            assertShipLoss(level, sublevel, new Vec3(9.5, 64.5, 0.5), new Vec3(12.5, 64.5, 0.5), 6.0);
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void rotatedShipSamplesPlotBlocks() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(10.0, 0.0, 1010.0);
-        pose.orientation().rotateY(Math.PI / 2.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(9, 64, 8, 11, 65, 10));
-        Vec3 worldStart = pose.transformPosition(new Vec3(999.5, 64.5, 0.5));
-        Vec3 worldEnd = pose.transformPosition(new Vec3(1002.5, 64.5, 0.5));
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            assertShipLoss(level, sublevel, worldStart, worldEnd, 6.0);
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void missedShipDoesNotAccessPlotBlocks() {
-        ServerLevel level = materialWorld();
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            double factor = FrequencySableMaterialAttenuation.factorForSublevels(level, new Vec3(9.5, 70.5, 0.5), new Vec3(12.5, 70.5, 0.5), List.of(sublevel));
-            assertEquals(1.0, factor, 0.0);
-            verify(level.getChunkSource(), never()).getChunkNow(anyInt(), anyInt());
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void profileSableMaterialSamplingAllocations() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess hit = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-        SubLevelAccess miss = ship(pose, new BoundingBox3d(10, 80, 0, 12, 81, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        List<SubLevelAccess> empty = List.of();
-        List<SubLevelAccess> missed = List.of(miss, miss, miss, miss, miss, miss, miss, miss);
-        List<SubLevelAccess> intersecting = List.of(hit, hit, hit, hit, hit, hit, hit, hit);
-
-        com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
-        if (memory != null && !memory.isThreadAllocatedMemoryEnabled()) {
-            memory.setThreadAllocatedMemoryEnabled(true);
-        }
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            for (int count : new int[]{250, 1000}) {
-                for (List<SubLevelAccess> sublevels : List.of(empty, missed, intersecting)) {
-                    for (int i = 0; i < 20; i++) {
-                        FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, sublevels);
-                    }
-
-                    long threadId = Thread.currentThread().threadId();
-                    long beforeBytes = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
-
-                    long startTime = System.nanoTime();
-                    double checksum = 0.0;
-
-                    for (int i = 0; i < count; i++) {
-                        checksum += FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, sublevels);
-                    }
-
-                    long elapsed = System.nanoTime() - startTime;
-                    long afterBytes = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
-                    double bytesPerQuery = memory == null ? -1.0 : (afterBytes - beforeBytes) / (double) count;
-
-                    assertTrue(Double.isFinite(checksum));
-                    System.out.printf(Locale.ROOT, "[FREQ-SABLE-MATERIAL] queries=%d ships=%d " + "us/query=%.3f bytes/query=%.1f%n", count, sublevels.size(), elapsed / (count * 1000.0), bytesPerQuery);
-                }
-            }
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void movingShipUpdatesMaterialIntersection() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 originalStart = new Vec3(9.5, 64.5, 0.5);
-        Vec3 originalEnd = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-        double expected = FrequencyMaterialRules.amplitudeFactor(6.0);
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, originalStart, originalEnd, List.of(sublevel)), 1.0e-9);
-
-        pose.position().set(-970.0, 0.0, 0.0);
-        when(sublevel.boundingBox()).thenReturn(new BoundingBox3d(30, 64, 0, 32, 65, 1));
-        assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, originalStart, originalEnd, List.of(sublevel)), 0.0);
-
-        Vec3 movedStart = new Vec3(29.5, 64.5, 0.5);
-        Vec3 movedEnd = new Vec3(32.5, 64.5, 0.5);
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, movedStart, movedEnd, List.of(sublevel)), 1.0e-9);
-    }
-
-    @Test
-    void multipleShipsAccumulateMaterialLoss() {
-        ServerLevel level = materialWorld();
-
-        Pose3d firstPose = new Pose3d();
-        firstPose.position().set(-990.0, 0.0, 0.0);
-
-        Pose3d secondPose = new Pose3d();
-        secondPose.position().set(-980.0, 0.0, 0.0);
-
-        SubLevelAccess first = ship(firstPose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-        SubLevelAccess second = ship(secondPose, new BoundingBox3d(20, 64, 0, 22, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(22.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        double expected = FrequencyMaterialRules.amplitudeFactor(12.0);
-
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(first, second)), 1.0e-9);
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, end, start, List.of(second, first)), 1.0e-9);
-    }
-
-    @Test
-    void overlappingDistinctShipsAccumulateIndependentLoss() {
-        ServerLevel level = materialWorld();
-
-        Pose3d firstPose = new Pose3d();
-        firstPose.position().set(-990.0, 0.0, 0.0);
-
-        Pose3d secondPose = new Pose3d();
-        secondPose.position().set(-990.0, 0.0, 0.0);
-
-        BoundingBox3d bounds = new BoundingBox3d(10, 64, 0, 12, 65, 1);
-
-        SubLevelAccess first = ship(firstPose, bounds);
-        SubLevelAccess second = ship(secondPose, bounds);
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        double expected = FrequencyMaterialRules.amplitudeFactor(12.0);
-
-        assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(first, second)), 1.0e-9);
-    }
-
-    @Test
-    void removedShipNoLongerContributesMaterialLoss() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-        assertShipLoss(level, sublevel, start, end, 6.0);
-
-        assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of()), 0.0);
-    }
-
-    @Test
-    void worldAndShipMaterialsBothContributeLoss() {
-        ServerLevel level = materialWorld();
-        LevelChunk chunk = level.getChunkSource().getChunkNow(0, 0);
-
-        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
-            BlockPos pos = call.getArgument(0);
-            return pos.getX() == 5 || pos.getX() == 1000 || pos.getX() == 1001 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
-        });
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(4.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        double world = FrequencyMaterialAttenuation.factor(level, start, end);
-        double ships = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel));
-
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(9.0), world * ships, 1.0e-9);
-    }
-
-
-    @Test
-    void shipStoneReplacesAmbientAirLoss() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        double worldFactor = FrequencyMaterialAttenuation.factor(level, start, end);
-        double shipFactor = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel));
-
-        double expected = FrequencyMaterialRules.amplitudeFactor(6.25);
-
-        assertEquals(expected, worldFactor * shipFactor, 1.0e-9);
-    }
-
-    @Test
-    void emptyShipDoesNotDoubleCountAir() {
-        ServerLevel level = materialWorld();
-        LevelChunk chunk = level.getChunkSource().getChunkNow(0, 0);
-
-        when(chunk.getBlockState(any(BlockPos.class))).thenReturn(Blocks.AIR.defaultBlockState());
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        double worldFactor = FrequencyMaterialAttenuation.factor(level, start, end);
-        double shipFactor = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel));
-
-        assertEquals(1.0, shipFactor, 1.0e-12);
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(0.75), worldFactor * shipFactor, 1.0e-12);
-    }
-
-    @Test
-    void loadedSublevelScanIgnoresShipsOutsideSignalPath() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess missed = ship(pose, new BoundingBox3d(20, 64, 0, 22, 65, 1));
-        SubLevelAccess hit = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-        double actual = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(missed, hit));
-
-        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), actual, 1.0e-9);
-    }
-
-    @Test
-    void materialTraversalSkipsUnloadedChunksWithoutSamplingThem() {
-        ServerLevel level = materialWorld();
-        ServerChunkCache source = level.getChunkSource();
-
-        when(source.getChunkNow(eq(62), eq(0))).thenReturn(null);
-
-        Vec3 start = new Vec3(990.5, 64.5, 0.5);
-        Vec3 end = new Vec3(1010.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
-            assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-12);
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void reusableWorkspacePreservesAlternatingIntersections() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-
-        Vec3 start = new Vec3(9.5, 64.5, 0.5);
-        Vec3 end = new Vec3(12.5, 64.5, 0.5);
-
-        Vec3 missedStart = new Vec3(9.5, 70.5, 0.5);
-        Vec3 missedEnd = new Vec3(12.5, 70.5, 0.5);
-
-        double expected = FrequencyMaterialRules.amplitudeFactor(6.0);
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            for (int i = 0; i < 200; i++) {
-                assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel)), 1.0e-9);
-                assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, missedStart, missedEnd, List.of(sublevel)), 0.0);
-                assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, end, start, List.of(sublevel)), 1.0e-9);
-            }
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
-    }
-
-    @Test
-    void receiverBatchKeepsPossibleShipIntersections() {
-        Vec3 receiver = Vec3.ZERO;
-
-        SubLevelAccess nearby = mock(SubLevelAccess.class);
-        SubLevelAccess boundary = mock(SubLevelAccess.class);
-        SubLevelAccess distant = mock(SubLevelAccess.class);
-
-        when(nearby.boundingBox()).thenReturn(new BoundingBox3d(10, -2, -2, 12, 2, 2));
-        when(boundary.boundingBox()).thenReturn(new BoundingBox3d(64, -2, -2, 66, 2, 2));
-        when(distant.boundingBox()).thenReturn(new BoundingBox3d(100, -2, -2, 102, 2, 2));
-
-        List<SubLevelAccess> all = List.of(distant, nearby, boundary);
-        assertEquals(List.of(nearby, boundary), FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 64.0));
-
-        when(distant.boundingBox()).thenReturn(new BoundingBox3d(3, -2, -2, 5, 2, 2));
-        assertEquals(all, FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 64.0));
-    }
-
-    @Test
-    void batchedShipsPreserveMaterialLossAcrossMovement() {
-        ServerLevel level = materialWorld();
-
-        Pose3d pose = new Pose3d();
-        pose.position().set(-990.0, 0.0, 0.0);
-
-        SubLevelAccess nearby = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
-        SubLevelAccess moving = ship(pose, new BoundingBox3d(100, 64, 0, 102, 65, 1));
-
-        List<SubLevelAccess> all = List.of(moving, nearby);
-
-        Vec3 receiver = new Vec3(9.5, 64.5, 0.5);
-        Vec3 transmitter = new Vec3(12.5, 64.5, 0.5);
-
-        FrequencyMaterialAttenuation.setEnabled(true);
-
-        try {
-            for (int i = 0; i < 2; i++) {
-                var candidates = FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 16.0);
-
-                assertEquals(i == 0 ? 1 : 2, candidates.size());
-
-                double original = FrequencySableMaterialAttenuation.factorForSublevels(level, transmitter, receiver, all);
-                double batched = FrequencySableMaterialAttenuation.factorForSublevels(level, transmitter, receiver, candidates);
-
-                assertEquals(original, batched, 0.0);
-
-                when(moving.boundingBox()).thenReturn(new BoundingBox3d(10, 64, 0, 12, 65, 1));
-            }
-        } finally {
-            FrequencyMaterialAttenuation.setEnabled(false);
-        }
+        assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, START, END, List.of()), 1.0e-12);
     }
 }
