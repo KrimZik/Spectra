@@ -390,7 +390,6 @@ public final class FrequencyMaterialBenchmarkDiagnostic {
                 Vec3 end = new Vec3(endX, y, z);
 
                 double factor = FrequencyMaterialAttenuation.factor(level, start, end);
-
                 for (int i = 0; i < WARMUP; i++) {
                     checksum = FrequencyMaterialAttenuation.factor(level, start, end);
                 }
