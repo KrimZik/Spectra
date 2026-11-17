@@ -1,1 +1,4 @@
-{}
+{
+  "block.spectra.dev_transmitter": "Spectra Dev Transmitter",
+  "block.spectra.dev_receiver": "Spectra Dev Receiver"
+}

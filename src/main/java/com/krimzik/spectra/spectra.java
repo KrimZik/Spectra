@@ -18,6 +18,7 @@ public final class spectra {
 
         if (!FMLEnvironment.production) {
             FrequencyDevTransmitter.register(modEventBus);
+            FrequencyDevReceiver.register(modEventBus);
             FrequencyMotionDiagnostic.install();
             FrequencyEmitterLifecycleDiagnostic.install();
             FrequencyBlockStressDiagnostic.install();

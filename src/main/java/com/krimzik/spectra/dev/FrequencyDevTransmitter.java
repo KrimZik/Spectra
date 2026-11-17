@@ -15,6 +15,8 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -34,6 +36,8 @@ public final class FrequencyDevTransmitter {
     private static final FrequencySignal SIGNAL = new FrequencySignal(915_000_127.0, 1.0, 0.0, 299_792_458.0);
     private static final DeferredRegister<net.minecraft.world.level.block.Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, spectra.MODID);
     private static final Supplier<TestBlock> BLOCK = BLOCKS.register("dev_transmitter", () -> new TestBlock(BlockBehaviour.Properties.of().strength(1.0F)));
+    private static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(spectra.MODID);
+    private static final Supplier<BlockItem> ITEM = ITEMS.register("dev_transmitter", () -> new BlockItem(BLOCK.get(), new Item.Properties()));
     private static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, spectra.MODID);
     private static final Supplier<BlockEntityType<TestBlockEntity>> TYPE = BLOCK_ENTITIES.register("dev_transmitter", () -> BlockEntityType.Builder.of(TestBlockEntity::new, BLOCK.get()).build(null));
 
@@ -45,12 +49,21 @@ public final class FrequencyDevTransmitter {
 
     private FrequencyDevTransmitter() {}
 
+    static double testFrequencyHz() {
+        return SIGNAL.frequencyHz();
+    }
+
+    static boolean isDevEmitter(FrequencyEmitter emitter) {
+        return emitter instanceof ProbeEmitter;
+    }
+
     static boolean isDevTransmitter(BlockEntity candidate) {
         return candidate instanceof TestBlockEntity;
     }
 
     public static void register(IEventBus modBus) {
         BLOCKS.register(modBus);
+        ITEMS.register(modBus);
         BLOCK_ENTITIES.register(modBus);
 
         NeoForge.EVENT_BUS.addListener(FrequencyDevTransmitter::onCommands);
