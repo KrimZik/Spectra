@@ -3,9 +3,7 @@ package com.krimzik.spectra.api.material;
 import com.krimzik.spectra.math.MaterialAttenuationMath;
 import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
-import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
-import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import net.minecraft.server.level.ServerLevel;
@@ -84,8 +82,8 @@ public final class FrequencySableMaterialAttenuation {
         return candidates == null ? List.of() : candidates;
     }
 
-    static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels) {
-        if (!FrequencyMaterialAttenuation.enabled() || start.equals(end)) {
+    public static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels) {
+        if (!FrequencyMaterialAttenuation.enabled() || start.equals(end) || sublevels.isEmpty()) {
             return 1.0;
         }
 
@@ -93,6 +91,7 @@ public final class FrequencySableMaterialAttenuation {
         double dy = end.y - start.y;
         double dz = end.z - start.z;
         double result = 1.0;
+        double worldPathLength = Double.NaN;
         Workspace work = null;
 
         double minX = Math.min(start.x, end.x);
@@ -172,7 +171,11 @@ public final class FrequencySableMaterialAttenuation {
                     double localDz = localEndZ - localStartZ;
 
                     double localDistance = Math.hypot(Math.hypot(localDx, localDy), localDz);
-                    double worldDistance = Math.hypot(Math.hypot(dx, dy), dz) * (exit - enter);
+                    if (Double.isNaN(worldPathLength)) {
+                        worldPathLength = Math.hypot(Math.hypot(dx, dy), dz);
+                    }
+
+                    double worldDistance = worldPathLength * (exit - enter);
 
                     if (localDistance > 0.0 && Double.isFinite(localDistance) && Double.isFinite(worldDistance)) {
                         result *= MaterialAttenuationMath.scaledFactor(localFactor, worldDistance, localDistance);

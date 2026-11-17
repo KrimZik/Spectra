@@ -15,6 +15,36 @@ import java.util.Objects;
 public final class FrequencyMaterialAttenuation {
     private static volatile boolean enabled;
 
+    private static final ThreadLocal<TraversalStats> ACTIVE_STATS = new ThreadLocal<>();
+
+    public static final class TraversalStats {
+        long paths;
+        long unloadedChunks;
+        long sections;
+        long uniformSections;
+        long uniformRegions;
+        long blockReads;
+
+        @Override
+        public String toString() {
+            return "paths=" + paths + " unloadedChunks=" + unloadedChunks + " sections=" + sections + " uniformSections=" + uniformSections + " uniformRegions=" + uniformRegions + " blockReads=" + blockReads;
+        }
+    }
+
+    public static TraversalStats beginTraversalStats() {
+        if (ACTIVE_STATS.get() != null) {
+            throw new IllegalStateException("Material traversal profiling already active");
+        }
+
+        TraversalStats stats = new TraversalStats();
+        ACTIVE_STATS.set(stats);
+        return stats;
+    }
+
+    public static void endTraversalStats() {
+        ACTIVE_STATS.remove();
+    }
+
     private FrequencyMaterialAttenuation() {}
 
     private static double boundaryTime(double offset, double direction, double inverseDirection) {
@@ -44,8 +74,21 @@ public final class FrequencyMaterialAttenuation {
         return factor(level, startX, startY, startZ, endX, endY, endZ, true);
     }
 
+    static double factorWithTrace(ServerLevel level, Vec3 start, Vec3 end, FrequencyMaterialPathCache.Trace trace) {
+        return factor(level, start.x, start.y, start.z, end.x, end.y, end.z, false, trace);
+    }
+
     private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir) {
+        return factor(level, startX, startY, startZ, endX, endY, endZ, relativeToAir, null);
+    }
+
+    private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir, FrequencyMaterialPathCache.Trace trace) {
         Objects.requireNonNull(level);
+
+        TraversalStats stats = ACTIVE_STATS.get();
+        if (stats != null) {
+            stats.paths++;
+        }
 
         if (!enabled) {
             return 1.0;
@@ -79,6 +122,7 @@ public final class FrequencyMaterialAttenuation {
         LevelChunk chunk = null;
         LevelChunkSection[] sections = null;
         LevelChunkSection section = null;
+        FrequencyMaterialSectionCache materialCache = null;
 
         int cachedSectionY = Integer.MIN_VALUE;
         boolean emptySection = false;
@@ -104,12 +148,21 @@ public final class FrequencyMaterialAttenuation {
                 chunk = chunkSource.getChunkNow(chunkX, chunkZ);
                 sections = chunk == null ? null : chunk.getSections();
                 section = null;
+                materialCache = null;
                 cachedSectionY = Integer.MIN_VALUE;
                 emptySection = false;
                 uniformSectionLoss = Double.NaN;
             }
 
             if (chunk == null) {
+                if (stats != null) {
+                    stats.unloadedChunks++;
+                }
+
+                if (trace != null) {
+                    trace.missing();
+                }
+
                 double tx = sx > 0 ? boundaryTime(((long) chunkX + 1L) * 16.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) chunkX * 16.0 - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
                 double tz = sz > 0 ? boundaryTime(((long) chunkZ + 1L) * 16.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime((long) chunkZ * 16.0 - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
 
@@ -153,55 +206,90 @@ public final class FrequencyMaterialAttenuation {
             }
 
             if (y >= minY && y < maxY && (y >> 4) != cachedSectionY) {
+                if (stats != null) {
+                    stats.sections++;
+                }
+
                 cachedSectionY = y >> 4;
                 int index = cachedSectionY - (minY >> 4);
 
                 section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
                 emptySection = skipAirSections && section != null && section.hasOnlyAir();
                 uniformSectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : Double.NaN;
+                materialCache = !emptySection && section instanceof FrequencyMaterialSectionAccess access ? access.spectra$materialSummary() : null;
+                if (trace != null) {
+                    trace.observe(section, materialCache);
+                }
             }
 
-            if (y >= minY && y < maxY && uniformSectionLoss >= 0.0) {
-                double exitX = sx > 0 ? boundaryTime(((long) chunkX + 1L) * 16.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) chunkX * 16.0 - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
-                double exitY = sy > 0 ? boundaryTime(((long) cachedSectionY + 1L) * 16.0 - startY, dy, inverseY) : sy < 0 ? boundaryTime((long) cachedSectionY * 16.0 - startY, dy, inverseY) : Double.POSITIVE_INFINITY;
-                double exitZ = sz > 0 ? boundaryTime(((long) chunkZ + 1L) * 16.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime((long) chunkZ * 16.0 - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
-                double exit = Math.min(1.0, Math.min(exitX, Math.min(exitY, exitZ)));
+            if (y >= minY && y < maxY) {
+                int shift = 4;
+                double regionLoss = uniformSectionLoss;
 
-                if (exit > t && Double.isFinite(exit)) {
-                    loss = MaterialAttenuationMath.accumulateLoss(loss, uniformSectionLoss - airBaseline, distance * (exit - t));
-                    if (exit >= 1.0) {
-                        break;
+                if (Double.isNaN(regionLoss) && materialCache != null) {
+                    regionLoss = materialCache.sectionLoss();
+
+                    if (Double.isNaN(regionLoss)) {
+                        shift = 2;
+                        regionLoss = materialCache.regionLoss(x & 15, y & 15, z & 15);
                     }
+                }
 
-                    if (sx != 0) {
-                        if (exitX <= exit) {
-                            x = sx > 0 ? (chunkX + 1) << 4 : (chunkX << 4) - 1;
-                        } else {
-                            double px = Math.fma(dx, exit, startX);
-                            x = (int) Math.floor(Math.nextAfter(px, sx > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                if (regionLoss >= 0.0) {
+                    int regionX = x >> shift;
+                    int regionY = y >> shift;
+                    int regionZ = z >> shift;
+
+                    double exitX = sx > 0 ? boundaryTime(((long) regionX + 1L) * (1 << shift) - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) regionX * (1 << shift) - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
+                    double exitY = sy > 0 ? boundaryTime(((long) regionY + 1L) * (1 << shift) - startY, dy, inverseY) : sy < 0 ? boundaryTime((long) regionY * (1 << shift) - startY, dy, inverseY) : Double.POSITIVE_INFINITY;
+                    double exitZ = sz > 0 ? boundaryTime(((long) regionZ + 1L) * (1 << shift) - startZ, dz, inverseZ) : sz < 0 ? boundaryTime((long) regionZ * (1 << shift) - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
+                    double exit = Math.min(1.0, Math.min(exitX, Math.min(exitY, exitZ)));
+
+                    if (exit > t && Double.isFinite(exit)) {
+                        if (stats != null) {
+                            if (shift == 4) {
+                                stats.uniformSections++;
+                            } else {
+                                stats.uniformRegions++;
+                            }
                         }
-                    }
 
-                    if (sy != 0) {
-                        if (exitY <= exit) {
-                            y = sy > 0 ? (cachedSectionY + 1) << 4 : (cachedSectionY << 4) - 1;
-                        } else {
-                            double py = Math.fma(dy, exit, startY);
-                            y = (int) Math.floor(Math.nextAfter(py, sy > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                        loss = MaterialAttenuationMath.accumulateLoss(loss, regionLoss - airBaseline, distance * (exit - t));
+
+                        if (exit >= 1.0) {
+                            break;
                         }
-                    }
 
-                    if (sz != 0) {
-                        if (exitZ <= exit) {
-                            z = sz > 0 ? (chunkZ + 1) << 4 : (chunkZ << 4) - 1;
-                        } else {
-                            double pz = Math.fma(dz, exit, startZ);
-                            z = (int) Math.floor(Math.nextAfter(pz, sz > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                        if (sx != 0) {
+                            if (exitX <= exit) {
+                                x = sx > 0 ? (regionX + 1) << shift : (regionX << shift) - 1;
+                            } else {
+                                double px = Math.fma(dx, exit, startX);
+                                x = (int) Math.floor(Math.nextAfter(px, sx > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                            }
                         }
-                    }
 
-                    t = exit;
-                    continue;
+                        if (sy != 0) {
+                            if (exitY <= exit) {
+                                y = sy > 0 ? (regionY + 1) << shift : (regionY << shift) - 1;
+                            } else {
+                                double py = Math.fma(dy, exit, startY);
+                                y = (int) Math.floor(Math.nextAfter(py, sy > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                            }
+                        }
+
+                        if (sz != 0) {
+                            if (exitZ <= exit) {
+                                z = sz > 0 ? (regionZ + 1) << shift : (regionZ << shift) - 1;
+                            } else {
+                                double pz = Math.fma(dz, exit, startZ);
+                                z = (int) Math.floor(Math.nextAfter(pz, sz > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                            }
+                        }
+
+                        t = exit;
+                        continue;
+                    }
                 }
             }
 
@@ -220,6 +308,10 @@ public final class FrequencyMaterialAttenuation {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
                 } else {
                     BlockState state;
+
+                    if (stats != null) {
+                        stats.blockReads++;
+                    }
 
                     if (section != null) {
                         state = section.getBlockState(x & 15, y & 15, z & 15);

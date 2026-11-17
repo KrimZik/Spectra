@@ -33,6 +33,11 @@ public final class FrequencyMaterialRules {
     private static volatile ConcurrentHashMap<BlockState, Double> attenuationCache = new ConcurrentHashMap<>();
     private static volatile double airLossDbPerMeter;
     private static volatile double waterLossDbPerMeter = 0.5;
+    private static volatile long materialRevision;
+
+    public static long revision() {
+        return materialRevision;
+    }
 
     private FrequencyMaterialRules() {}
 
@@ -44,6 +49,7 @@ public final class FrequencyMaterialRules {
         airLossDbPerMeter = air;
         waterLossDbPerMeter = water;
         attenuationCache = new ConcurrentHashMap<>();
+        materialRevision++;
     }
 
     public static double airLossDbPerMeter() {
@@ -69,6 +75,7 @@ public final class FrequencyMaterialRules {
     public static void replaceOverrides(List<Rule> rules) {
         overrides = List.copyOf(Objects.requireNonNull(rules));
         attenuationCache = new ConcurrentHashMap<>();
+        materialRevision++;
     }
 
     public static double decibelsPerMeter(BlockState state) {

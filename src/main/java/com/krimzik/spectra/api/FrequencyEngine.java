@@ -72,11 +72,13 @@ public final class FrequencyEngine {
     }
 
     private static final class MaterialCandidates {
+        final FrequencyReceiver receiver;
         final double rangeMeters;
         List<? extends SubLevelAccess> ships;
         boolean resolved;
 
-        MaterialCandidates(double rangeMeters) {
+        MaterialCandidates(FrequencyReceiver receiver, double rangeMeters) {
+            this.receiver = receiver;
             this.rangeMeters = rangeMeters;
         }
     }
@@ -835,6 +837,7 @@ public final class FrequencyEngine {
 
     void onChunkUnload(long chunkKey) {
         checkWritable();
+        pathAttenuation.clearCachedPaths();
 
         Set<FrequencyRegistration> registrations = chunkRegistrations.remove(chunkKey);
         if (registrations == null) {
@@ -1317,7 +1320,7 @@ public final class FrequencyEngine {
         activeQueries++;
 
         try {
-            MaterialCandidates shipCandidates = receptionConsumer == null ? null : new MaterialCandidates(rangeMeters);
+            MaterialCandidates shipCandidates = receptionConsumer == null ? null : new MaterialCandidates(receiver, rangeMeters);
             int fixedCandidates = 0;
 
             if (fixedEmitterSpatialIndex.size() >= 512) {
@@ -1390,7 +1393,7 @@ public final class FrequencyEngine {
                 shipCandidates.resolved = true;
             }
 
-            amplitude *= pathAttenuation.factor(emitterWorldPos, receiverWorldPos, shipCandidates.ships);
+            amplitude *= pathAttenuation.factorForReception(shipCandidates.receiver, emitter, emitterWorldPos, receiverWorldPos, shipCandidates.ships);
         }
 
         double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());
@@ -1548,6 +1551,7 @@ public final class FrequencyEngine {
 
     void shutdown() {
         stopped = true;
+        pathAttenuation.clearCachedPaths();
         interferenceWorkspaces.clear();
         emitters.clear();
         receivers.clear();

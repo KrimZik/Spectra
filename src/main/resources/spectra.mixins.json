@@ -4,6 +4,7 @@
   "package": "com.krimzik.spectra.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "LevelChunkSectionMaterialMixin"
   ],
   "client": [
   ],

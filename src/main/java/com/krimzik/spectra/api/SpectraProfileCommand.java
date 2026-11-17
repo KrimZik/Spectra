@@ -4,6 +4,7 @@ import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
 import com.krimzik.spectra.api.material.FrequencySableMaterialAttenuation;
+import com.krimzik.spectra.api.material.MinecraftMaterialPropagation;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.logging.LogUtils;
 import com.sun.management.ThreadMXBean;
@@ -179,6 +180,45 @@ public final class SpectraProfileCommand {
                 }
             };
 
+            MinecraftMaterialPropagation batchedPropagation = new MinecraftMaterialPropagation(level);
+            Runnable sableBatchedMaterials = () -> {
+                var candidates = batchedPropagation.receiverCandidates(receiverWorld, RANGE);
+                if (candidates == null) {
+                    return;
+                }
+
+                for (Vec3 emitterWorld : paths) {
+                    sink[0] += FrequencySableMaterialAttenuation.factorForSublevels(level, emitterWorld, receiverWorld, candidates);
+                }
+            };
+
+            var allCandidates = batchedPropagation.receiverCandidates(receiverWorld, RANGE);
+            Runnable sableSingleCandidate;
+
+            if (allCandidates == null || allCandidates.isEmpty()) {
+                sableSingleCandidate = () -> {};
+            } else {
+                var selected = java.util.List.of(allCandidates.get(0));
+
+                sableSingleCandidate = () -> {
+                    for (Vec3 emitterWorld : paths) {
+                        sink[0] += FrequencySableMaterialAttenuation.factorForSublevels(level, emitterWorld, receiverWorld, selected);
+                    }
+                };
+            }
+
+            Runnable sableEmptyCandidates = () -> {
+                for (Vec3 emitterWorld : paths) {
+                    sink[0] += FrequencySableMaterialAttenuation.factorForSublevels(level, emitterWorld, receiverWorld, java.util.List.of());
+                }
+            };
+
+            Runnable cachedWorldMaterials = () -> {
+                for (Vec3 emitterWorld : paths) {
+                    sink[0] += batchedPropagation.factorForReception(receiverWorld, emitterWorld, emitterWorld, receiverWorld, java.util.List.of());
+                }
+            };
+
             Runnable sableContainerOnly = () -> {
                 for (Vec3 ignored : paths) {
                     SubLevelContainer container = SubLevelContainer.getContainer(level);
@@ -241,6 +281,11 @@ public final class SpectraProfileCommand {
             measure(count, "SABLE_CONTAINER_ONLY", sableContainerOnly, memory);
             measure(count, "SABLE_BOUNDS_ONLY", sableBoundsOnly, memory);
             measure(count, "SABLE_MATERIAL_ONLY", sableMaterials, memory);
+            measure(count, "SABLE_BATCHED_MATERIAL_ONLY", sableBatchedMaterials, memory);
+            measure(count, "SABLE_SINGLE_CANDIDATE", sableSingleCandidate, memory);
+            measure(count, "SABLE_EMPTY_CANDIDATES", sableEmptyCandidates, memory);
+            measure(count, "WORLD_MATERIAL_CACHED_NO_SHIPS", cachedWorldMaterials, memory);
+            org.slf4j.LoggerFactory.getLogger(SpectraProfileCommand.class).info("[SPECTRA-PROFILE] WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);
             FrequencyMaterialAttenuation.setEnabled(false);
             measure(count, "RECEPTION_NO_MATERIALS", reception, memory);
