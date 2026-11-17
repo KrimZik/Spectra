@@ -2,6 +2,7 @@ package com.krimzik.spectra.api.material;
 
 import com.krimzik.spectra.math.MaterialAttenuationMath;
 import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
@@ -11,6 +12,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3d;
 
+import java.util.List;
 import java.util.Objects;
 
 public final class FrequencySableMaterialAttenuation {
@@ -25,20 +27,16 @@ public final class FrequencySableMaterialAttenuation {
             return 1.0;
         }
 
-        BoundingBox3d query = new BoundingBox3d(
-                Math.min(start.x, end.x),
-                Math.min(start.y, end.y),
-                Math.min(start.z, end.z),
-                Math.max(start.x, end.x),
-                Math.max(start.y, end.y),
-                Math.max(start.z, end.z)
-        );
+        SubLevelContainer container = SubLevelContainer.getContainer(level);
+        if (container == null || container.getLoadedCount() == 0) {
+            return 1.0;
+        }
 
-        return factorForSublevels(level, start, end, SableCompanion.INSTANCE.getAllIntersecting(level, query));
+        return factorForSublevels(level, start, end, container.getAllSubLevels());
     }
 
 
-    static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, Iterable<? extends SubLevelAccess> sublevels) {
+    static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels) {
         if (!FrequencyMaterialAttenuation.enabled() || start.equals(end)) {
             return 1.0;
         }
@@ -50,8 +48,20 @@ public final class FrequencySableMaterialAttenuation {
         Vector3d scratch = null;
         SegmentAabbClip.Interval interval = null;
 
-        for (SubLevelAccess sublevel : sublevels) {
+        double minX = Math.min(start.x, end.x);
+        double minY = Math.min(start.y, end.y);
+        double minZ = Math.min(start.z, end.z);
+        double maxX = Math.max(start.x, end.x);
+        double maxY = Math.max(start.y, end.y);
+        double maxZ = Math.max(start.z, end.z);
+
+        for (int i = 0, size = sublevels.size(); i < size; i++) {
+            SubLevelAccess sublevel = sublevels.get(i);
             BoundingBox3dc bounds = sublevel.boundingBox();
+
+            if (bounds.maxX() < minX || bounds.minX() > maxX || bounds.maxY() < minY || bounds.minY() > maxY || bounds.maxZ() < minZ || bounds.minZ() > maxZ) {
+                continue;
+            }
 
             if (interval == null) {
                 interval = new SegmentAabbClip.Interval();

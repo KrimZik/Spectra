@@ -186,14 +186,15 @@ class FrequencyMaterialTraversalTest {
         sections[8] = empty;
 
         when(chunk.getSections()).thenReturn(sections);
-        when(chunk.getBlockState(any(BlockPos.class))).thenReturn(Blocks.AIR.defaultBlockState());
+        when(empty.getBlockState(anyInt(), anyInt(), anyInt())).thenReturn(Blocks.AIR.defaultBlockState());
 
         FrequencyMaterialRules.replaceOverrides(java.util.List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:air"), 2.0)));
         double result = FrequencyMaterialAttenuation.factor(level, new Vec3(0.5, 64.5, 0.5), new Vec3(10.5, 64.5, 0.5));
         assertEquals(FrequencyMaterialRules.amplitudeFactor(20.0), result, 1.0e-12);
 
-        verify(chunk, times(11)).getBlockState(any(BlockPos.class));
+        verify(empty, times(11)).getBlockState(anyInt(), anyInt(), anyInt());
         verify(empty, never()).hasOnlyAir();
+        verify(chunk, never()).getBlockState(any(BlockPos.class));
     }
 
 
@@ -237,5 +238,213 @@ class FrequencyMaterialTraversalTest {
         assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
 
         verify(chunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void emptySectionsSkipDirectlyToLoadedStone() {
+        LevelChunk emptyChunk = mock(LevelChunk.class);
+        LevelChunkSection air = mock(LevelChunkSection.class);
+        when(air.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = air;
+        when(emptyChunk.getSections()).thenReturn(sections);
+
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
+            int chunkX = call.getArgument(0);
+            return chunkX == 0 || chunkX == 1 ? emptyChunk : chunk;
+        });
+
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+            BlockPos pos = call.getArgument(0);
+            return pos.getX() == 32 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(33.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(3.0 + 32.0 * 0.25);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(emptyChunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void diagonalEmptySectionsPreserveExactAirDistance() {
+        LevelChunkSection air = mock(LevelChunkSection.class);
+        when(air.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = air;
+        sections[9] = air;
+
+        when(chunk.getSections()).thenReturn(sections);
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+
+        Vec3 start = new Vec3(1.5, 64.5, 1.5);
+        Vec3 end = new Vec3(17.5, 80.5, 17.5);
+
+        double distance = Math.sqrt(16.0 * 16.0 * 3.0);
+        double expected = FrequencyMaterialRules.amplitudeFactor(distance * 0.25);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(chunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void exactSectionBoundaryDoesNotSkipFollowingStone() {
+        LevelChunk airChunk = mock(LevelChunk.class);
+        LevelChunkSection air = mock(LevelChunkSection.class);
+        when(air.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = air;
+        when(airChunk.getSections()).thenReturn(sections);
+
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
+            int chunkX = call.getArgument(0);
+            return chunkX == 0 || chunkX == 1 ? airChunk : chunk;
+        });
+
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+            BlockPos pos = call.getArgument(0);
+            return pos.getX() == 32 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+
+        Vec3 start = new Vec3(0.0, 64.5, 0.5);
+        Vec3 end = new Vec3(32.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(32.0 * 0.25 + 0.5 * 3.0);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(airChunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void negativeSectionBoundaryPreservesMaterialThickness() {
+        LevelChunk airChunk = mock(LevelChunk.class);
+        LevelChunkSection air = mock(LevelChunkSection.class);
+        when(air.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = air;
+        when(airChunk.getSections()).thenReturn(sections);
+
+        when(chunkSource.getChunkNow(anyInt(), anyInt())).thenAnswer(call -> {
+            int chunkX = call.getArgument(0);
+            return chunkX == -2 ? airChunk : chunk;
+        });
+
+        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> {
+            BlockPos pos = call.getArgument(0);
+            return pos.getX() == -1 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+
+        Vec3 start = new Vec3(-32.0, 64.5, 0.5);
+        Vec3 end = new Vec3(-0.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(31.0 * 0.25 + 0.5 * 3.0);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(airChunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void uniformSolidSectionsUseVoxelTraversal() {
+        LevelChunkSection solid = mock(LevelChunkSection.class);
+        when(solid.getBlockState(anyInt(), anyInt(), anyInt())).thenReturn(Blocks.STONE.defaultBlockState());
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = solid;
+        when(chunk.getSections()).thenReturn(sections);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(64.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(192.0);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(solid, atLeast(64)).getBlockState(anyInt(), anyInt(), anyInt());
+        verify(chunk, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void mixedSectionsStillSampleIndividualBlocks() {
+        LevelChunkSection mixed = mock(LevelChunkSection.class);
+        when(mixed.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(call -> {
+            int x = call.getArgument(0);
+            return x == 1 || x == 2 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = mixed;
+        when(chunk.getSections()).thenReturn(sections);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(3.5, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(6.0);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+
+        verify(mixed, atLeast(8)).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void negativeDirectionStartingAtExactChunkBoundaryPreservesLoss() {
+        LevelChunkSection solid = mock(LevelChunkSection.class);
+        when(solid.getBlockState(anyInt(), anyInt(), anyInt())).thenReturn(Blocks.STONE.defaultBlockState());
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = solid;
+        when(chunk.getSections()).thenReturn(sections);
+
+        Vec3 start = new Vec3(32.0, 64.5, 0.5);
+        Vec3 end = new Vec3(0.0, 64.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(96.0);
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-10);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-10);
+    }
+
+    @Test
+    void diagonalSectionCrossingPreservesMaterialThickness() {
+        LevelChunkSection solid = mock(LevelChunkSection.class);
+        when(solid.getBlockState(anyInt(), anyInt(), anyInt())).thenReturn(Blocks.STONE.defaultBlockState());
+
+        LevelChunkSection air = mock(LevelChunkSection.class);
+        when(air.hasOnlyAir()).thenReturn(true);
+
+        LevelChunkSection[] sections = new LevelChunkSection[24];
+        sections[8] = solid;
+        sections[9] = air;
+        when(chunk.getSections()).thenReturn(sections);
+
+        Vec3 start = new Vec3(0.5, 64.5, 0.5);
+        Vec3 end = new Vec3(31.5, 95.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(3.0 * 15.5 * Math.sqrt(2.0));
+
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-9);
+        assertEquals(expected, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-9);
     }
 }

@@ -256,7 +256,7 @@ class FrequencyMaterialBenchmarkTest {
         when(chunk.getSections()).thenReturn(sections);
 
         when(section.hasOnlyAir()).thenAnswer(call -> mode[0] == 0);
-        when(chunk.getBlockState(any(BlockPos.class))).thenAnswer(call -> mode[0] == 2 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
+        when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(call -> mode[0] == 2 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
 
         Vec3 start = new Vec3(0.5, 64.5, 0.5);
         Vec3 end = new Vec3(128.5, 64.5, 0.5);

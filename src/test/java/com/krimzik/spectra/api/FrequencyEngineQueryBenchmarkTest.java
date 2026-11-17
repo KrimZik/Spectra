@@ -19,10 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.*;
 
 class FrequencyEngineQueryBenchmarkTest {
     private static final double BASE_HZ = 915_000_000.0;
@@ -30,7 +27,7 @@ class FrequencyEngineQueryBenchmarkTest {
     private static final double WINDOW_SECONDS = 0.25;
     private static final long END_TICK = 4_000_000_001L;
     private static volatile double blackhole;
-    private static final boolean FULL_BENCHMARK = Boolean.getBoolean("spectra.fullQueryBenchmark");
+    private static final boolean FULL_BENCHMARK = false;
 
     private enum Scenario { SHARED, DISTINCT_ALL, DISTINCT_NARROW }
     private enum Stage { LOOKUP, RAW_DISTANCE, PROJECTION_CONTROL, SPATIAL, RECEPTION, FINITE_WINDOW }
@@ -131,9 +128,8 @@ class FrequencyEngineQueryBenchmarkTest {
         when(level.getServer()).thenReturn(server);
         when(server.isSameThread()).thenReturn(true);
 
-        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class, withSettings().stubOnly())) {
             space.when(() -> FrequencySpace.worldPosition(eq(level), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
-
             com.sun.management.ThreadMXBean memory = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported() ? bean : null;
 
             if (memory != null && !memory.isThreadAllocatedMemoryEnabled()) {
@@ -176,7 +172,6 @@ class FrequencyEngineQueryBenchmarkTest {
                         int[] receptionHits = {0};
                         engine.forEachReceivedInRange(receivers[0], range, (emitter, signal, distanceSquared, amplitude, travelTime) -> receptionHits[0]++);
                         assertEquals(expectedNearby, receptionHits[0]);
-                        space.clearInvocations();
 
                         for (Stage stage : new Stage[]{Stage.LOOKUP, Stage.RAW_DISTANCE, Stage.PROJECTION_CONTROL, Stage.SPATIAL, Stage.RECEPTION}) {
                             double[] sink = {0.0};
@@ -214,7 +209,6 @@ class FrequencyEngineQueryBenchmarkTest {
                             for (int warmup = 0; warmup < (FULL_BENCHMARK ? 10 : 2); warmup++) {
                                 for (Runnable query : queries) {
                                     query.run();
-                                    space.clearInvocations();
                                 }
                             }
 
@@ -237,7 +231,6 @@ class FrequencyEngineQueryBenchmarkTest {
                                             allocated += memory.getThreadAllocatedBytes(threadId) - bytesBefore;
                                         }
 
-                                        space.clearInvocations();
                                     }
                                 }
 

@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
@@ -15,6 +16,10 @@ public final class FrequencyMaterialAttenuation {
     private static volatile boolean enabled;
 
     private FrequencyMaterialAttenuation() {}
+
+    private static double boundaryTime(double offset, double direction, double inverseDirection) {
+        return Double.isFinite(inverseDirection) ? offset * inverseDirection : offset / direction;
+    }
 
     public static boolean enabled() {
         return enabled;
@@ -59,6 +64,10 @@ public final class FrequencyMaterialAttenuation {
         int sy = Double.compare(dy, 0.0);
         int sz = Double.compare(dz, 0.0);
 
+        double inverseX = 1.0 / dx;
+        double inverseY = 1.0 / dy;
+        double inverseZ = 1.0 / dz;
+
         int x = (int) Math.floor(startX);
         int y = (int) Math.floor(startY);
         int z = (int) Math.floor(startZ);
@@ -69,9 +78,11 @@ public final class FrequencyMaterialAttenuation {
         ServerChunkCache chunkSource = level.getChunkSource();
         LevelChunk chunk = null;
         LevelChunkSection[] sections = null;
+        LevelChunkSection section = null;
 
         int cachedSectionY = Integer.MIN_VALUE;
         boolean emptySection = false;
+        double uniformSectionLoss = Double.NaN;
         boolean skipAirSections = FrequencyMaterialRules.canSkipAirSections();
 
         double t = 0.0;
@@ -81,7 +92,7 @@ public final class FrequencyMaterialAttenuation {
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
 
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos pos = null;
 
         while (t < 1.0) {
             int chunkX = x >> 4;
@@ -91,13 +102,16 @@ public final class FrequencyMaterialAttenuation {
                 cachedChunkX = chunkX;
                 cachedChunkZ = chunkZ;
                 chunk = chunkSource.getChunkNow(chunkX, chunkZ);
-                sections = chunk == null || !skipAirSections ? null : chunk.getSections();
+                sections = chunk == null ? null : chunk.getSections();
+                section = null;
                 cachedSectionY = Integer.MIN_VALUE;
+                emptySection = false;
+                uniformSectionLoss = Double.NaN;
             }
 
             if (chunk == null) {
-                double tx = sx > 0 ? (((long) chunkX + 1L) * 16.0 - startX) / dx : sx < 0 ? ((long) chunkX * 16.0 - startX) / dx : Double.POSITIVE_INFINITY;
-                double tz = sz > 0 ? (((long) chunkZ + 1L) * 16.0 - startZ) / dz : sz < 0 ? ((long) chunkZ * 16.0 - startZ) / dz : Double.POSITIVE_INFINITY;
+                double tx = sx > 0 ? boundaryTime(((long) chunkX + 1L) * 16.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) chunkX * 16.0 - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
+                double tz = sz > 0 ? boundaryTime(((long) chunkZ + 1L) * 16.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime((long) chunkZ * 16.0 - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
 
                 double next = Math.min(1.0, Math.min(tx, tz));
                 if (next >= 1.0) {
@@ -138,31 +152,87 @@ public final class FrequencyMaterialAttenuation {
                 continue;
             }
 
-            double tx = sx > 0 ? (x + 1.0 - startX) / dx : sx < 0 ? (x - startX) / dx : Double.POSITIVE_INFINITY;
-            double ty = sy > 0 ? (y + 1.0 - startY) / dy : sy < 0 ? (y - startY) / dy : Double.POSITIVE_INFINITY;
-            double tz = sz > 0 ? (z + 1.0 - startZ) / dz : sz < 0 ? (z - startZ) / dz : Double.POSITIVE_INFINITY;
-            double next = Math.min(1.0, Math.min(tx, Math.min(ty, tz)));
+            if (y >= minY && y < maxY && (y >> 4) != cachedSectionY) {
+                cachedSectionY = y >> 4;
+                int index = cachedSectionY - (minY >> 4);
 
+                section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
+                emptySection = skipAirSections && section != null && section.hasOnlyAir();
+                uniformSectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : Double.NaN;
+            }
+
+            if (y >= minY && y < maxY && uniformSectionLoss >= 0.0) {
+                double exitX = sx > 0 ? boundaryTime(((long) chunkX + 1L) * 16.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) chunkX * 16.0 - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
+                double exitY = sy > 0 ? boundaryTime(((long) cachedSectionY + 1L) * 16.0 - startY, dy, inverseY) : sy < 0 ? boundaryTime((long) cachedSectionY * 16.0 - startY, dy, inverseY) : Double.POSITIVE_INFINITY;
+                double exitZ = sz > 0 ? boundaryTime(((long) chunkZ + 1L) * 16.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime((long) chunkZ * 16.0 - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
+                double exit = Math.min(1.0, Math.min(exitX, Math.min(exitY, exitZ)));
+
+                if (exit > t && Double.isFinite(exit)) {
+                    loss = MaterialAttenuationMath.accumulateLoss(loss, uniformSectionLoss - airBaseline, distance * (exit - t));
+                    if (exit >= 1.0) {
+                        break;
+                    }
+
+                    if (sx != 0) {
+                        if (exitX <= exit) {
+                            x = sx > 0 ? (chunkX + 1) << 4 : (chunkX << 4) - 1;
+                        } else {
+                            double px = Math.fma(dx, exit, startX);
+                            x = (int) Math.floor(Math.nextAfter(px, sx > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                        }
+                    }
+
+                    if (sy != 0) {
+                        if (exitY <= exit) {
+                            y = sy > 0 ? (cachedSectionY + 1) << 4 : (cachedSectionY << 4) - 1;
+                        } else {
+                            double py = Math.fma(dy, exit, startY);
+                            y = (int) Math.floor(Math.nextAfter(py, sy > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                        }
+                    }
+
+                    if (sz != 0) {
+                        if (exitZ <= exit) {
+                            z = sz > 0 ? (chunkZ + 1) << 4 : (chunkZ << 4) - 1;
+                        } else {
+                            double pz = Math.fma(dz, exit, startZ);
+                            z = (int) Math.floor(Math.nextAfter(pz, sz > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY));
+                        }
+                    }
+
+                    t = exit;
+                    continue;
+                }
+            }
+
+            double tx = sx > 0 ? boundaryTime(x + 1.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime(x - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
+            double ty = sy > 0 ? boundaryTime(y + 1.0 - startY, dy, inverseY) : sy < 0 ? boundaryTime(y - startY, dy, inverseY) : Double.POSITIVE_INFINITY;
+            double tz = sz > 0 ? boundaryTime(z + 1.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime(z - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
+
+            double next = Math.min(1.0, Math.min(tx, Math.min(ty, tz)));
             if (next < t || !Double.isFinite(next)) {
                 break;
             }
 
             if (y >= minY && y < maxY && next > t) {
-                int sectionY = y >> 4;
-
-                if (sectionY != cachedSectionY) {
-                    cachedSectionY = sectionY;
-                    int index = sectionY - (minY >> 4);
-
-                    emptySection = sections != null && index >= 0 && index < sections.length && sections[index] != null && sections[index].hasOnlyAir();
-                }
-
                 double length = distance * (next - t);
                 if (emptySection) {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
                 } else {
-                    pos.set(x, y, z);
-                    double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(chunk.getBlockState(pos));
+                    BlockState state;
+
+                    if (section != null) {
+                        state = section.getBlockState(x & 15, y & 15, z & 15);
+                    } else {
+                        if (pos == null) {
+                            pos = new BlockPos.MutableBlockPos();
+                        }
+
+                        pos.set(x, y, z);
+                        state = chunk.getBlockState(pos);
+                    }
+
+                    double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(state);
                     loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
                 }
             }

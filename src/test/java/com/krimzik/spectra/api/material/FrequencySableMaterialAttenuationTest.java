@@ -421,4 +421,42 @@ class FrequencySableMaterialAttenuationTest {
         assertEquals(FrequencyMaterialRules.amplitudeFactor(0.75), worldFactor * shipFactor, 1.0e-12);
     }
 
+    @Test
+    void loadedSublevelScanIgnoresShipsOutsideSignalPath() {
+        ServerLevel level = materialWorld();
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(-990.0, 0.0, 0.0);
+
+        SubLevelAccess missed = ship(pose, new BoundingBox3d(20, 64, 0, 22, 65, 1));
+        SubLevelAccess hit = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
+
+        Vec3 start = new Vec3(9.5, 64.5, 0.5);
+        Vec3 end = new Vec3(12.5, 64.5, 0.5);
+
+        FrequencyMaterialAttenuation.setEnabled(true);
+        double actual = FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(missed, hit));
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), actual, 1.0e-9);
+    }
+
+    @Test
+    void materialTraversalSkipsUnloadedChunksWithoutSamplingThem() {
+        ServerLevel level = materialWorld();
+        ServerChunkCache source = level.getChunkSource();
+
+        when(source.getChunkNow(eq(62), eq(0))).thenReturn(null);
+
+        Vec3 start = new Vec3(990.5, 64.5, 0.5);
+        Vec3 end = new Vec3(1010.5, 64.5, 0.5);
+
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        try {
+            assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
+            assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-12);
+        } finally {
+            FrequencyMaterialAttenuation.setEnabled(false);
+        }
+    }
 }

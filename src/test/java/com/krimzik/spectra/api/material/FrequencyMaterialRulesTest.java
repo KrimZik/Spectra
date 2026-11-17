@@ -42,4 +42,34 @@ class FrequencyMaterialRulesTest {
         FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.tag(ResourceLocation.parse("minecraft:planks"), 7.0), FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:oak_planks"), 2.0)));
         assertEquals(2.0, FrequencyMaterialRules.decibelsPerMeter(Blocks.OAK_PLANKS.defaultBlockState()), 0.0);
     }
+
+    @Test
+    void cachedBlockLossUpdatesWhenOverridesChange() {
+        var stone = Blocks.STONE.defaultBlockState();
+
+        FrequencyMaterialRules.replaceOverrides(List.of());
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:stone"), 8.0)));
+
+        assertEquals(8.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+
+        FrequencyMaterialRules.replaceOverrides(List.of());
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+    }
+
+    @Test
+    void cachedEnvironmentLossUpdatesWhenSettingsChange() {
+        var air = Blocks.AIR.defaultBlockState();
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
+        assertEquals(0.0, FrequencyMaterialRules.decibelsPerMeter(air), 0.0);
+
+        FrequencyMaterialRules.setEnvironmentLoss(1.5, 2.0);
+        assertEquals(1.5, FrequencyMaterialRules.decibelsPerMeter(air), 0.0);
+
+        FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
+        assertEquals(0.25, FrequencyMaterialRules.decibelsPerMeter(air), 0.0);
+    }
 }

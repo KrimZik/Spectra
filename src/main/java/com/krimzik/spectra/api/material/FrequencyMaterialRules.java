@@ -14,6 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class FrequencyMaterialRules {
     public record Rule(ResourceLocation block, TagKey<Block> tag, double decibelsPerMeter) {
@@ -29,6 +30,7 @@ public final class FrequencyMaterialRules {
     }
 
     private static volatile List<Rule> overrides = List.of();
+    private static volatile ConcurrentHashMap<BlockState, Double> attenuationCache = new ConcurrentHashMap<>();
     private static volatile double airLossDbPerMeter;
     private static volatile double waterLossDbPerMeter = 0.5;
 
@@ -41,6 +43,7 @@ public final class FrequencyMaterialRules {
 
         airLossDbPerMeter = air;
         waterLossDbPerMeter = water;
+        attenuationCache = new ConcurrentHashMap<>();
     }
 
     public static double airLossDbPerMeter() {
@@ -65,10 +68,15 @@ public final class FrequencyMaterialRules {
 
     public static void replaceOverrides(List<Rule> rules) {
         overrides = List.copyOf(Objects.requireNonNull(rules));
+        attenuationCache = new ConcurrentHashMap<>();
     }
 
     public static double decibelsPerMeter(BlockState state) {
         Objects.requireNonNull(state);
+        return attenuationCache.computeIfAbsent(state, FrequencyMaterialRules::calculateLoss);
+    }
+
+    private static double calculateLoss(BlockState state) {
         List<Rule> rules = overrides;
 
         for (Rule rule : rules) {
