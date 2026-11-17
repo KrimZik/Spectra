@@ -1,5 +1,7 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.math.MaterialAttenuationMath;
+import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
@@ -46,58 +48,27 @@ public final class FrequencySableMaterialAttenuation {
         double dz = end.z - start.z;
         double result = 1.0;
         Vector3d scratch = null;
+        SegmentAabbClip.Interval interval = null;
 
         for (SubLevelAccess sublevel : sublevels) {
             BoundingBox3dc bounds = sublevel.boundingBox();
 
-            double enter = 0.0;
-            double exit = 1.0;
-
-            if (dx == 0.0) {
-                if (start.x < bounds.minX() || start.x > bounds.maxX()) {
-                    continue;
-                }
-            } else {
-                double a = (bounds.minX() - start.x) / dx;
-                double b = (bounds.maxX() - start.x) / dx;
-                enter = Math.max(enter, Math.min(a, b));
-                exit = Math.min(exit, Math.max(a, b));
-                if (enter >= exit) {
-                    continue;
-                }
+            if (interval == null) {
+                interval = new SegmentAabbClip.Interval();
             }
 
-            if (dy == 0.0) {
-                if (start.y < bounds.minY() || start.y > bounds.maxY()) {
-                    continue;
-                }
-            } else {
-                double a = (bounds.minY() - start.y) / dy;
-                double b = (bounds.maxY() - start.y) / dy;
-                enter = Math.max(enter, Math.min(a, b));
-                exit = Math.min(exit, Math.max(a, b));
-                if (enter >= exit) {
-                    continue;
-                }
-            }
-
-            if (dz == 0.0) {
-                if (start.z < bounds.minZ() || start.z > bounds.maxZ()) {
-                    continue;
-                }
-            } else {
-                double a = (bounds.minZ() - start.z) / dz;
-                double b = (bounds.maxZ() - start.z) / dz;
-                enter = Math.max(enter, Math.min(a, b));
-                exit = Math.min(exit, Math.max(a, b));
-                if (enter >= exit) {
-                    continue;
-                }
-            }
-
-            if (enter >= exit) {
+            if (!SegmentAabbClip.clip(
+                    start.x, start.y, start.z,
+                    end.x, end.y, end.z,
+                    bounds.minX(), bounds.minY(), bounds.minZ(),
+                    bounds.maxX(), bounds.maxY(), bounds.maxZ(),
+                    interval
+            )) {
                 continue;
             }
+
+            double enter = interval.enter();
+            double exit = interval.exit();
 
             if (scratch == null) {
                 scratch = new Vector3d();
@@ -129,7 +100,7 @@ public final class FrequencySableMaterialAttenuation {
             double localEndY = scratch.y;
             double localEndZ = scratch.z;
 
-            double localFactor = FrequencyMaterialAttenuation.factorRelativeToAir(level, localStartX, localStartY, localStartZ, localEndX, localEndY, localEndZ);
+            double localFactor = MinecraftMaterialPathSampler.INSTANCE.factor(level, localStartX, localStartY, localStartZ, localEndX, localEndY, localEndZ, true);
             if (localFactor == 1.0) {
                 continue;
             }
@@ -146,55 +117,11 @@ public final class FrequencySableMaterialAttenuation {
                 double worldDistance = Math.hypot(Math.hypot(dx, dy), dz) * (exit - enter);
 
                 if (localDistance > 0.0 && Double.isFinite(localDistance) && Double.isFinite(worldDistance)) {
-                    result *= Math.pow(localFactor, worldDistance / localDistance);
+                    result *= MaterialAttenuationMath.scaledFactor(localFactor, worldDistance, localDistance);
                 }
             }
         }
 
         return result;
-    }
-
-    static double[] intersection(Vec3 start, Vec3 end, BoundingBox3dc bounds) {
-        double[] result = new double[2];
-        return intersection(start, end, bounds, result) ? result : null;
-    }
-
-    private static boolean intersection(Vec3 start, Vec3 end, BoundingBox3dc bounds, double[] interval) {
-        interval[0] = 0.0;
-        interval[1] = 1.0;
-
-        if (!clipAxis(start.x, end.x - start.x, bounds.minX(), bounds.maxX(), interval)) {
-            return false;
-        }
-
-        if (!clipAxis(start.y, end.y - start.y, bounds.minY(), bounds.maxY(), interval)) {
-            return false;
-        }
-
-        if (!clipAxis(start.z, end.z - start.z, bounds.minZ(), bounds.maxZ(), interval)) {
-            return false;
-        }
-
-        return interval[1] > interval[0];
-    }
-
-    private static boolean clipAxis(double origin, double direction, double min, double max, double[] interval) {
-        if (direction == 0.0) {
-            return origin >= min && origin <= max;
-        }
-
-        double entry = (min - origin) / direction;
-        double exit = (max - origin) / direction;
-
-        if (entry > exit) {
-            double swap = entry;
-            entry = exit;
-            exit = swap;
-        }
-
-        interval[0] = Math.max(interval[0], entry);
-        interval[1] = Math.min(interval[1], exit);
-
-        return interval[0] <= interval[1];
     }
 }

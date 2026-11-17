@@ -1,5 +1,6 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.companion.math.Pose3d;
@@ -24,6 +25,22 @@ import static org.junit.jupiter.api.Assertions.*;
 class FrequencySableMaterialAttenuationTest {
     private static final double EPSILON = 1.0e-12;
 
+    private static double[] intersection(Vec3 start, Vec3 end, BoundingBox3d bounds) {
+        SegmentAabbClip.Interval interval = new SegmentAabbClip.Interval();
+
+        if (!SegmentAabbClip.clip(
+                start.x, start.y, start.z,
+                end.x, end.y, end.z,
+                bounds.minX(), bounds.minY(), bounds.minZ(),
+                bounds.maxX(), bounds.maxY(), bounds.maxZ(),
+                interval
+        )) {
+            return null;
+        }
+
+        return new double[]{interval.enter(), interval.exit()};
+    }
+
     @BeforeEach
     void setupMaterialSettings() {
         FrequencyMaterialAttenuation.setEnabled(false);
@@ -41,7 +58,7 @@ class FrequencySableMaterialAttenuationTest {
     @Test
     void straightPathIsClippedToShipBounds() {
         BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        double[] interval = FrequencySableMaterialAttenuation.intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
+        double[] interval = intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
 
         assertNotNull(interval);
         assertEquals(0.2, interval[0], EPSILON);
@@ -52,8 +69,8 @@ class FrequencySableMaterialAttenuationTest {
     void reversePathHasSameIntersectionLength() {
         BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
 
-        double[] forward = FrequencySableMaterialAttenuation.intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
-        double[] reverse = FrequencySableMaterialAttenuation.intersection(new Vec3(10, 1, 1), new Vec3(0, 1, 1), bounds);
+        double[] forward = intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds);
+        double[] reverse = intersection(new Vec3(10, 1, 1), new Vec3(0, 1, 1), bounds);
 
         assertNotNull(forward);
         assertNotNull(reverse);
@@ -64,13 +81,13 @@ class FrequencySableMaterialAttenuationTest {
     @Test
     void nearbyShipOutsideRayIsIgnored() {
         BoundingBox3d bounds = new BoundingBox3d(2, 3, 0, 4, 5, 2);
-        assertNull(FrequencySableMaterialAttenuation.intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds));
+        assertNull(intersection(new Vec3(0, 1, 1), new Vec3(10, 1, 1), bounds));
     }
 
     @Test
     void diagonalIntersectionIsClippedCorrectly() {
         BoundingBox3d bounds = new BoundingBox3d(2, 2, 0, 4, 4, 2);
-        double[] interval = FrequencySableMaterialAttenuation.intersection(new Vec3(0, 0, 1), new Vec3(6, 6, 1), bounds);
+        double[] interval = intersection(new Vec3(0, 0, 1), new Vec3(6, 6, 1), bounds);
 
         assertNotNull(interval);
         assertEquals(1.0 / 3.0, interval[0], EPSILON);
@@ -80,13 +97,13 @@ class FrequencySableMaterialAttenuationTest {
     @Test
     void cornerTouchHasZeroMaterialThickness() {
         BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        assertNull(FrequencySableMaterialAttenuation.intersection(new Vec3(0, 0, 1), new Vec3(4, 4, 1), bounds));
+        assertNull(intersection(new Vec3(0, 0, 1), new Vec3(4, 4, 1), bounds));
     }
 
     @Test
     void pathStartingInsideShipIsClippedCorrectly() {
         BoundingBox3d bounds = new BoundingBox3d(2, 0, 0, 4, 2, 2);
-        double[] interval = FrequencySableMaterialAttenuation.intersection(new Vec3(3, 1, 1), new Vec3(5, 1, 1), bounds);
+        double[] interval = intersection(new Vec3(3, 1, 1), new Vec3(5, 1, 1), bounds);
 
         assertNotNull(interval);
         assertEquals(0.0, interval[0], EPSILON);

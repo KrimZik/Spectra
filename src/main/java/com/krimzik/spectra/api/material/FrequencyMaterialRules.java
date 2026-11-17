@@ -1,5 +1,6 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.math.MaterialAttenuationMath;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
@@ -99,18 +100,10 @@ public final class FrequencyMaterialRules {
     }
 
     public static double amplitudeFactor(double lossDb) {
-        if (!Double.isFinite(lossDb) || lossDb < 0.0) {
-            throw new IllegalArgumentException("Invalid attenuation");
-        }
-
-        return relativeAmplitudeFactor(lossDb);
+        return MaterialAttenuationMath.amplitudeFactor(lossDb);
     }
 
     static double relativeAmplitudeFactor(double lossDb) {
-        if (!Double.isFinite(lossDb)) {
-            throw new IllegalArgumentException("Invalid attenuation");
-        }
-
-        return Math.exp(-0.11512925464970229 * lossDb);
+        return MaterialAttenuationMath.relativeAmplitudeFactor(lossDb);
     }
 }

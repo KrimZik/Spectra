@@ -1,5 +1,6 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.math.MaterialAttenuationMath;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
@@ -158,11 +159,11 @@ public final class FrequencyMaterialAttenuation {
 
                 double length = distance * (next - t);
                 if (emptySection) {
-                    loss = Math.fma(FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length, loss);
+                    loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
                 } else {
                     pos.set(x, y, z);
                     double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(chunk.getBlockState(pos));
-                    loss = Math.fma(lossPerMeter - airBaseline, length, loss);
+                    loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
                 }
             }
 
