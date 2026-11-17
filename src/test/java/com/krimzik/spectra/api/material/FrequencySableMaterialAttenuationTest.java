@@ -395,7 +395,6 @@ class FrequencySableMaterialAttenuationTest {
         assertEquals(expected, worldFactor * shipFactor, 1.0e-9);
     }
 
-
     @Test
     void emptyShipDoesNotDoubleCountAir() {
         ServerLevel level = materialWorld();
@@ -455,6 +454,89 @@ class FrequencySableMaterialAttenuationTest {
         try {
             assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, start, end), 1.0e-12);
             assertEquals(1.0, FrequencyMaterialAttenuation.factor(level, end, start), 1.0e-12);
+        } finally {
+            FrequencyMaterialAttenuation.setEnabled(false);
+        }
+    }
+
+    @Test
+    void reusableWorkspacePreservesAlternatingIntersections() {
+        ServerLevel level = materialWorld();
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(-990.0, 0.0, 0.0);
+
+        SubLevelAccess sublevel = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
+
+        Vec3 start = new Vec3(9.5, 64.5, 0.5);
+        Vec3 end = new Vec3(12.5, 64.5, 0.5);
+
+        Vec3 missedStart = new Vec3(9.5, 70.5, 0.5);
+        Vec3 missedEnd = new Vec3(12.5, 70.5, 0.5);
+
+        double expected = FrequencyMaterialRules.amplitudeFactor(6.0);
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        try {
+            for (int i = 0; i < 200; i++) {
+                assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, List.of(sublevel)), 1.0e-9);
+                assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, missedStart, missedEnd, List.of(sublevel)), 0.0);
+                assertEquals(expected, FrequencySableMaterialAttenuation.factorForSublevels(level, end, start, List.of(sublevel)), 1.0e-9);
+            }
+        } finally {
+            FrequencyMaterialAttenuation.setEnabled(false);
+        }
+    }
+
+    @Test
+    void receiverBatchKeepsPossibleShipIntersections() {
+        Vec3 receiver = Vec3.ZERO;
+
+        SubLevelAccess nearby = mock(SubLevelAccess.class);
+        SubLevelAccess boundary = mock(SubLevelAccess.class);
+        SubLevelAccess distant = mock(SubLevelAccess.class);
+
+        when(nearby.boundingBox()).thenReturn(new BoundingBox3d(10, -2, -2, 12, 2, 2));
+        when(boundary.boundingBox()).thenReturn(new BoundingBox3d(64, -2, -2, 66, 2, 2));
+        when(distant.boundingBox()).thenReturn(new BoundingBox3d(100, -2, -2, 102, 2, 2));
+
+        List<SubLevelAccess> all = List.of(distant, nearby, boundary);
+        assertEquals(List.of(nearby, boundary), FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 64.0));
+
+        when(distant.boundingBox()).thenReturn(new BoundingBox3d(3, -2, -2, 5, 2, 2));
+        assertEquals(all, FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 64.0));
+    }
+
+    @Test
+    void batchedShipsPreserveMaterialLossAcrossMovement() {
+        ServerLevel level = materialWorld();
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(-990.0, 0.0, 0.0);
+
+        SubLevelAccess nearby = ship(pose, new BoundingBox3d(10, 64, 0, 12, 65, 1));
+        SubLevelAccess moving = ship(pose, new BoundingBox3d(100, 64, 0, 102, 65, 1));
+
+        List<SubLevelAccess> all = List.of(moving, nearby);
+
+        Vec3 receiver = new Vec3(9.5, 64.5, 0.5);
+        Vec3 transmitter = new Vec3(12.5, 64.5, 0.5);
+
+        FrequencyMaterialAttenuation.setEnabled(true);
+
+        try {
+            for (int i = 0; i < 2; i++) {
+                var candidates = FrequencySableMaterialAttenuation.receiverCandidates(all, receiver, 16.0);
+
+                assertEquals(i == 0 ? 1 : 2, candidates.size());
+
+                double original = FrequencySableMaterialAttenuation.factorForSublevels(level, transmitter, receiver, all);
+                double batched = FrequencySableMaterialAttenuation.factorForSublevels(level, transmitter, receiver, candidates);
+
+                assertEquals(original, batched, 0.0);
+
+                when(moving.boundingBox()).thenReturn(new BoundingBox3d(10, 64, 0, 12, 65, 1));
+            }
         } finally {
             FrequencyMaterialAttenuation.setEnabled(false);
         }

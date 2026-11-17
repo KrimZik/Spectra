@@ -6,20 +6,20 @@ import com.krimzik.spectra.api.consumers.FrequencyDopplerMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer;
 import com.krimzik.spectra.api.material.MinecraftMaterialPropagation;
-import com.krimzik.spectra.propagation.PathAttenuation;
 import com.krimzik.spectra.api.motion.FrequencyMotion;
 import com.krimzik.spectra.api.motion.FrequencyMotionSnapshot;
 import com.krimzik.spectra.api.motion.FrequencyAccelerationTracker;
 import com.krimzik.spectra.api.registration.FrequencyRegistration;
 import com.krimzik.spectra.math.*;
+import dev.ryanhcode.sable.companion.SubLevelAccess;
 
 import com.mojang.logging.LogUtils;
-import it.unimi.dsi.fastutil.doubles.Double2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.phys.Vec3;
+import it.unimi.dsi.fastutil.doubles.Double2IntOpenHashMap;
 import org.slf4j.Logger;
 
 import java.util.*;
@@ -71,8 +71,18 @@ public final class FrequencyEngine {
         long teleportEpoch = Long.MIN_VALUE;
     }
 
+    private static final class MaterialCandidates {
+        final double rangeMeters;
+        List<? extends SubLevelAccess> ships;
+        boolean resolved;
+
+        MaterialCandidates(double rangeMeters) {
+            this.rangeMeters = rangeMeters;
+        }
+    }
+
     private final ServerLevel level;
-    private final PathAttenuation<Vec3> pathAttenuation;
+    private final MinecraftMaterialPropagation pathAttenuation;
     private boolean stopped;
     private int activeQueries;
     private static final int MAX_POOLED_INTERFERENCE = 2;
@@ -1307,6 +1317,7 @@ public final class FrequencyEngine {
         activeQueries++;
 
         try {
+            MaterialCandidates shipCandidates = receptionConsumer == null ? null : new MaterialCandidates(rangeMeters);
             int fixedCandidates = 0;
 
             if (fixedEmitterSpatialIndex.size() >= 512) {
@@ -1320,7 +1331,7 @@ public final class FrequencyEngine {
             if (useIndex) {
                 for (FrequencyBucket bucket : liveByFrequency.subMap(minFrequency, true, maxFrequency, true).values()) {
                     for (int i = 0; i < bucket.size; i++) {
-                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null);
+                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null, shipCandidates);
                     }
                 }
 
@@ -1332,14 +1343,14 @@ public final class FrequencyEngine {
                         emitter -> {
                             Double registeredFrequency = emitters.get(emitter);
                             if (registeredFrequency != null && registeredFrequency >= minFrequency && registeredFrequency <= maxFrequency) {
-                                acceptRangeCandidate(emitter, receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, fixedEmitterPositions.get(emitter));
+                                acceptRangeCandidate(emitter, receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, fixedEmitterPositions.get(emitter), shipCandidates);
                             }
                         }
                 );
             } else {
                 for (FrequencyBucket bucket : matchingBuckets.values()) {
                     for (int i = 0; i < bucket.size; i++) {
-                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null);
+                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null, shipCandidates);
                     }
                 }
             }
@@ -1348,7 +1359,7 @@ public final class FrequencyEngine {
         }
     }
 
-    private void acceptRangeCandidate(FrequencyEmitter emitter, Vec3 receiverWorldPos, double frequency, double tolerance, double rangeSquared, FrequencyMatchConsumer matchConsumer, FrequencyReceptionConsumer receptionConsumer, Vec3 fixedWorldPosition) {
+    private void acceptRangeCandidate(FrequencyEmitter emitter, Vec3 receiverWorldPos, double frequency, double tolerance, double rangeSquared, FrequencyMatchConsumer matchConsumer, FrequencyReceptionConsumer receptionConsumer, Vec3 fixedWorldPosition, MaterialCandidates shipCandidates) {
         if (!emitter.isEmitting()) {
             return;
         }
@@ -1374,7 +1385,12 @@ public final class FrequencyEngine {
         double amplitude = FrequencyPropagation.amplitudeAtDistance(signal.amplitude(), distance);
 
         if (amplitude != 0.0) {
-            amplitude *= pathAttenuation.factor(emitterWorldPos, receiverWorldPos);
+            if (!shipCandidates.resolved) {
+                shipCandidates.ships = pathAttenuation.receiverCandidates(receiverWorldPos, shipCandidates.rangeMeters);
+                shipCandidates.resolved = true;
+            }
+
+            amplitude *= pathAttenuation.factor(emitterWorldPos, receiverWorldPos, shipCandidates.ships);
         }
 
         double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());

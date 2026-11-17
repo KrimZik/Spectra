@@ -98,7 +98,7 @@ final class FrequencySpatialIndex<T> {
             return false;
         }
 
-        int limit = Math.max(1, matchingCandidates / 12);
+        int limit = Math.max(1, matchingCandidates / 4);
         int candidates = 0;
         Cell lookup = new Cell(0, 0, 0);
 

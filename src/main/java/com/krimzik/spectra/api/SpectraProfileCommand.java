@@ -7,6 +7,7 @@ import com.krimzik.spectra.api.material.FrequencySableMaterialAttenuation;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.logging.LogUtils;
 import com.sun.management.ThreadMXBean;
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import net.minecraft.commands.CommandSourceStack;
@@ -163,8 +164,7 @@ public final class SpectraProfileCommand {
             measure(count, "LOOKUP", lookup, memory);
             measure(count, "RAW_DISTANCE", rawDistance, memory);
             measure(count, "PROJECTION", projection, memory);
-            measure(count, "SPATIAL", spatial, memory);
-            measure(count, "SPATIAL_INDEX_SNAPSHOT", indexedSpatial, memory);
+            compareSpatialStrategies(count, spatial, indexedSpatial, memory);
             measure(count, "RECEPTION", reception, memory);
 
             Runnable worldMaterials = () -> {
@@ -176,6 +176,43 @@ public final class SpectraProfileCommand {
             Runnable sableMaterials = () -> {
                 for (Vec3 emitterWorld : paths) {
                     sink[0] += FrequencySableMaterialAttenuation.factor(level, emitterWorld, receiverWorld);
+                }
+            };
+
+            Runnable sableContainerOnly = () -> {
+                for (Vec3 ignored : paths) {
+                    SubLevelContainer container = SubLevelContainer.getContainer(level);
+                    if (container != null) {
+                        sink[0] += container.getLoadedCount();
+                    }
+                }
+            };
+
+            Runnable sableBoundsOnly = () -> {
+                SubLevelContainer container = SubLevelContainer.getContainer(level);
+
+                if (container == null || container.getLoadedCount() == 0) {
+                    return;
+                }
+
+                var sublevels = container.getAllSubLevels();
+                for (Vec3 emitterWorld : paths) {
+                    double minX = Math.min(emitterWorld.x, receiverWorld.x);
+                    double minY = Math.min(emitterWorld.y, receiverWorld.y);
+                    double minZ = Math.min(emitterWorld.z, receiverWorld.z);
+                    double maxX = Math.max(emitterWorld.x, receiverWorld.x);
+                    double maxY = Math.max(emitterWorld.y, receiverWorld.y);
+                    double maxZ = Math.max(emitterWorld.z, receiverWorld.z);
+
+                    for (int i = 0; i < sublevels.size(); i++) {
+                        var bounds = sublevels.get(i).boundingBox();
+
+                        if (bounds.maxX() < minX || bounds.minX() > maxX || bounds.maxY() < minY || bounds.minY() > maxY || bounds.maxZ() < minZ || bounds.minZ() > maxZ) {
+                            continue;
+                        }
+
+                        sink[0] += 1.0;
+                    }
                 }
             };
 
@@ -201,6 +238,8 @@ public final class SpectraProfileCommand {
             };
 
             measure(count, "WORLD_MATERIAL_ONLY", worldMaterials, memory);
+            measure(count, "SABLE_CONTAINER_ONLY", sableContainerOnly, memory);
+            measure(count, "SABLE_BOUNDS_ONLY", sableBoundsOnly, memory);
             measure(count, "SABLE_MATERIAL_ONLY", sableMaterials, memory);
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);
             FrequencyMaterialAttenuation.setEnabled(false);
@@ -228,6 +267,48 @@ public final class SpectraProfileCommand {
         }
 
         return bean;
+    }
+
+    private static void compareSpatialStrategies(int count, Runnable spatial, Runnable indexedSpatial, ThreadMXBean memory) {
+        Runnable[] tasks = {spatial, indexedSpatial};
+        String[] names = {"SPATIAL_PAIRED", "SPATIAL_INDEX_SNAPSHOT_PAIRED"};
+
+        int samples = 9;
+        int repetitions = 32;
+        double[][] times = new double[2][samples];
+        double[][] allocations = new double[2][samples];
+        long threadId = Thread.currentThread().threadId();
+
+        for (int i = 0; i < 160; i++) {
+            tasks[i & 1].run();
+        }
+
+        for (int sample = 0; sample < samples; sample++) {
+            for (int turn = 0; turn < 2; turn++) {
+                int mode = (sample + turn) & 1;
+                Runnable task = tasks[mode];
+
+                long before = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+                long start = System.nanoTime();
+
+                for (int i = 0; i < repetitions; i++) {
+                    task.run();
+                }
+
+                long elapsed = System.nanoTime() - start;
+                long after = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+
+                times[mode][sample] = elapsed / (repetitions * 1000.0);
+                allocations[mode][sample] = memory == null ? -1.0 : (after - before) / (double) repetitions;
+            }
+        }
+
+        for (int mode = 0; mode < tasks.length; mode++) {
+            Arrays.sort(times[mode]);
+            Arrays.sort(allocations[mode]);
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] emitters=%d stage=%s median=%.3f us/query allocated=%.1f bytes/query", count, names[mode], times[mode][samples / 2], allocations[mode][samples / 2]));
+        }
     }
 
     private static void measure(int count, String stage, Runnable task, ThreadMXBean memory) {

@@ -590,4 +590,97 @@ class FrequencyEngineCoreRegressionTest extends FrequencyEngineFixture {
             engine.shutdown();
         }
     }
+
+
+    @Test
+    void indexedAndLiveReceptionAgreeAcrossMovingAndZeroAmplitudeSignals() {
+        record Fixed(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        class Moving implements FrequencyEmitter {
+            Vec3 position = new Vec3(4.0, 0.0, 0.0);
+
+            @Override
+            public Vec3 position() {
+                return position;
+            }
+
+            @Override
+            public FrequencySignal signal() {
+                return new FrequencySignal(440.0, 1.0, 0.0, 100.0);
+            }
+        }
+
+        FrequencyEngine baseline = new FrequencyEngine(level);
+        TestReceiver receiver = new TestReceiver(440.0, 1.0);
+        FrequencySignal distantSignal = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+        boolean previousMaterials = FrequencyMaterialAttenuation.enabled();
+
+        try (MockedStatic<FrequencySpace> space = mockWorldSpace(level)) {
+            FrequencyMaterialAttenuation.setEnabled(false);
+
+            for (int i = 0; i < 1200; i++) {
+                Fixed emitter = new Fixed(new Vec3(512.0 + i, 0.0, 0.0), distantSignal);
+                engine.registerChunkBound(BlockPos.ZERO, emitter);
+                baseline.register(emitter);
+            }
+
+            Fixed near = new Fixed(new Vec3(3.0, 4.0, 0.0), new FrequencySignal(440.0, 2.0, 0.0, 100.0));
+            Fixed silent = new Fixed(new Vec3(8.0, 0.0, 0.0), new FrequencySignal(441.0, 0.0, 0.0, 100.0));
+            Fixed unrelated = new Fixed(new Vec3(10.0, 0.0, 0.0), new FrequencySignal(442.0, 1.0, 0.0, 100.0));
+
+            for (Fixed emitter : List.of(near, silent, unrelated)) {
+                engine.registerChunkBound(BlockPos.ZERO, emitter);
+                baseline.register(emitter);
+            }
+
+            Moving moving = new Moving();
+            engine.register(moving);
+            baseline.register(moving);
+
+            assertReceptionEquivalent(engine, baseline, receiver, 3);
+
+            moving.position = new Vec3(600.0, 0.0, 0.0);
+            assertReceptionEquivalent(engine, baseline, receiver, 2);
+
+            moving.position = new Vec3(-4.0, 0.0, 0.0);
+            assertReceptionEquivalent(engine, baseline, receiver, 3);
+        } finally {
+            FrequencyMaterialAttenuation.setEnabled(previousMaterials);
+            baseline.shutdown();
+            engine.shutdown();
+        }
+    }
+
+    private record Received(double distanceSquared, double amplitude, double travelTime) {}
+
+    private static void assertReceptionEquivalent(FrequencyEngine indexed, FrequencyEngine baseline, TestReceiver receiver, int expectedCount) {
+        Map<FrequencyEmitter, Received> indexedResults = captureReception(indexed, receiver);
+        Map<FrequencyEmitter, Received> baselineResults = captureReception(baseline, receiver);
+
+        assertEquals(expectedCount, indexedResults.size());
+        assertEquals(expectedCount, baselineResults.size());
+
+        for (Map.Entry<FrequencyEmitter, Received> entry : baselineResults.entrySet()) {
+            Received actual = indexedResults.get(entry.getKey());
+            assertNotNull(actual);
+
+            Received expected = entry.getValue();
+
+            assertEquals(expected.distanceSquared(), actual.distanceSquared(), 0.0);
+            assertEquals(expected.amplitude(), actual.amplitude(), 0.0);
+            assertEquals(expected.travelTime(), actual.travelTime(), 0.0);
+        }
+    }
+
+    private static Map<FrequencyEmitter, Received> captureReception(FrequencyEngine source, TestReceiver receiver) {
+        Map<FrequencyEmitter, Received> received = new IdentityHashMap<>();
+        source.forEachReceivedInRange(receiver, 32.0, (emitter, signal, distanceSquared, amplitude, travelTime) -> assertNull(received.put(emitter, new Received(distanceSquared, amplitude, travelTime))));
+
+        return received;
+    }
 }

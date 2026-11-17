@@ -106,4 +106,23 @@ class FrequencySpatialAdaptiveTest {
             assertEquals(expected, actual);
         }
     }
+
+    @Test
+    void adaptiveSelectionHandlesModerateAndDensePopulations() {
+        for (int nearby : new int[]{1_000, 5_000}) {
+            FrequencySpatialIndex<Object> index = new FrequencySpatialIndex<>();
+
+            for (int i = 0; i < 10_000; i++) {
+                boolean close = i < nearby;
+
+                double x = close ? i % 23 - 11.0 : 512.0 + i % 29;
+                double y = close ? i / 529 - 11.0 : 0.0;
+                double z = close ? (i / 23) % 23 - 11.0 : 512.0 + i % 31;
+
+                index.update(new Object(), x, y, z);
+            }
+
+            assertEquals(nearby == 1_000, index.favorsIndex(0.0, 0.0, 0.0, 64.0, 10_000));
+        }
+    }
 }

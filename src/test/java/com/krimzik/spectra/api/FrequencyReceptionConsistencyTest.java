@@ -95,28 +95,25 @@ class FrequencyReceptionConsistencyTest {
     void receptionUsesCurrentMaterialSettingsAndOverrides() {
         Fixture f = fixture();
 
-        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class);
-             MockedStatic<FrequencySableMaterialAttenuation> sable = mockStatic(FrequencySableMaterialAttenuation.class)) {
-
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
             space.when(() -> FrequencySpace.worldPosition(eq(f.level()), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
-            sable.when(() -> FrequencySableMaterialAttenuation.factor(eq(f.level()), any(Vec3.class), any(Vec3.class))).thenReturn(0.5);
 
             assertEquals(1.0 / 3.0, receivedAmplitude(f), EPSILON);
 
             FrequencyMaterialAttenuation.setEnabled(true);
 
             double expected = FrequencyMaterialRules.amplitudeFactor(3.0);
-            assertEquals(expected / 6.0, receivedAmplitude(f), EPSILON);
+            assertEquals(expected / 3.0, receivedAmplitude(f), EPSILON);
 
             FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
 
             expected = FrequencyMaterialRules.amplitudeFactor(3.5);
-            assertEquals(expected / 6.0, receivedAmplitude(f), EPSILON);
+            assertEquals(expected / 3.0, receivedAmplitude(f), EPSILON);
 
             FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:stone"), 6.0)));
 
             expected = FrequencyMaterialRules.amplitudeFactor(6.5);
-            assertEquals(expected / 6.0, receivedAmplitude(f), EPSILON);
+            assertEquals(expected / 3.0, receivedAmplitude(f), EPSILON);
 
             FrequencyMaterialAttenuation.setEnabled(false);
 
@@ -130,11 +127,8 @@ class FrequencyReceptionConsistencyTest {
     void interferenceUsesAttenuatedAmplitudeExactlyOnce() {
         Fixture f = fixture();
 
-        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class);
-             MockedStatic<FrequencySableMaterialAttenuation> sable = mockStatic(FrequencySableMaterialAttenuation.class)) {
-
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
             space.when(() -> FrequencySpace.worldPosition(eq(f.level()), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
-            sable.when(() -> FrequencySableMaterialAttenuation.factor(eq(f.level()), any(Vec3.class), any(Vec3.class))).thenReturn(0.5);
 
             double baselineSample = f.engine().sampleInterferenceInRange(f.receiver(), RANGE, 0.123);
             double baselineMeanSquare = f.engine().sampleInterferenceMeanSquareInRange(f.receiver(), RANGE);
@@ -146,7 +140,7 @@ class FrequencyReceptionConsistencyTest {
 
             FrequencyMaterialAttenuation.setEnabled(true);
 
-            double factor = 0.5 * FrequencyMaterialRules.amplitudeFactor(3.0);
+            double factor = FrequencyMaterialRules.amplitudeFactor(3.0);
 
             assertEquals(baselineSample * factor, f.engine().sampleInterferenceInRange(f.receiver(), RANGE, 0.123), EPSILON);
             assertEquals(baselineMeanSquare * factor * factor, f.engine().sampleInterferenceMeanSquareInRange(f.receiver(), RANGE), EPSILON);
