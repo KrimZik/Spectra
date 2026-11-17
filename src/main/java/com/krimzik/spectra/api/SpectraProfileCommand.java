@@ -32,26 +32,29 @@ public final class SpectraProfileCommand {
 
     private SpectraProfileCommand() {}
 
-    private record Emitter(Vec3 position, FrequencySignal signal)
-            implements FrequencyEmitter {
+    private record Emitter(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+        @Override
+        public boolean hasFixedWorldPosition() {
+            return true;
+        }
     }
 
-    private record Receiver(Vec3 position, double tunedFrequencyHz,
-                            double toleranceHz) implements FrequencyReceiver {
-    }
+    private record Receiver(Vec3 position, double tunedFrequencyHz, double toleranceHz) implements FrequencyReceiver {}
 
     @SubscribeEvent
     public static void register(RegisterCommandsEvent event) {
         event.getDispatcher().register(
                 Commands.literal("spectra_profile")
                         .requires(source -> source.hasPermission(2))
-                        .executes(context -> profile(context.getSource(), 200))
+                        .executes(context -> profile(context.getSource(), 200, 10))
                         .then(Commands.argument("emitters", IntegerArgumentType.integer(10, 100000))
-                                .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"))))
+                                .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 10))
+                                .then(Commands.argument("nearPercent", IntegerArgumentType.integer(0, 100))
+                                        .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "nearPercent")))))
         );
     }
 
-    private static int profile(CommandSourceStack source, int count) {
+    private static int profile(CommandSourceStack source, int count, int nearPercent) {
         ServerLevel level = source.getLevel();
         Vec3 origin = source.getPosition();
         FrequencyEngine engine = new FrequencyEngine(level);
@@ -64,24 +67,41 @@ public final class SpectraProfileCommand {
 
         try {
             for (int i = 0; i < count; i++) {
-                boolean close = i % 10 == 0;
+                boolean close = i % 100 < nearPercent;
                 Vec3 position;
 
                 if (close) {
-                    int index = i / 10;
-                    position = origin.add(8 + index % 12, 0, 8 + (index / 12) % 12);
-                    nearby++;
+                    int index = (nearby++ * 1097) % 12167;
+                    position = origin.add(index % 23 - 11, index / 529 - 11, (index / 23) % 23 - 11);
                 } else {
                     position = origin.add(512 + i % 32, 0, 512 + (i / 32) % 32);
                 }
 
                 Emitter emitter = new Emitter(position, signal);
                 emitters[i] = emitter;
-                engine.register(emitter);
+                engine.registerChunkBound(net.minecraft.core.BlockPos.containing(position), emitter);
             }
 
             Receiver receiver = new Receiver(origin, FREQUENCY, 0.0);
             Vec3 receiverWorld = FrequencySpace.worldPosition(level, receiver.position());
+
+            FrequencySpatialIndex<FrequencyEmitter> index = new FrequencySpatialIndex<>();
+
+            ThreadMXBean memory = memoryBean();
+            long threadId = Thread.currentThread().threadId();
+            long bytesBefore = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+            long buildStart = System.nanoTime();
+
+            for (FrequencyEmitter emitter : emitters) {
+                Vec3 world = FrequencySpace.worldPosition(level, emitter.position());
+                index.update(emitter, world.x, world.y, world.z);
+            }
+
+            long buildNanos = System.nanoTime() - buildStart;
+            long buildBytes = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId) - bytesBefore;
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] INDEX_BUILD entries=%d time=%.3f ms allocated=%d B", index.size(), buildNanos / 1_000_000.0, buildBytes));
+
             Vec3[] materialTargets = new Vec3[count];
             int materialTargetCount = 0;
 
@@ -94,11 +114,15 @@ public final class SpectraProfileCommand {
             }
 
             Vec3[] paths = Arrays.copyOf(materialTargets, materialTargetCount);
+            int[] indexedMatches = {0};
+            index.forEachWithin(receiverWorld.x, receiverWorld.y, receiverWorld.z, RANGE, emitter -> indexedMatches[0]++);
+            if (indexedMatches[0] != materialTargetCount) {
+                throw new IllegalStateException("Spatial index mismatch: expected " + materialTargetCount + ", found " + indexedMatches[0]);
+            }
 
             LOGGER.info("[SPECTRA-PROFILE] matchedMaterialPaths={}", paths.length);
 
             double[] sink = {0.0};
-            ThreadMXBean memory = memoryBean();
 
             LOGGER.info("[SPECTRA-PROFILE] emitters={} nearby={} materials={}", count, nearby, FrequencyMaterialAttenuation.enabled());
 
@@ -114,27 +138,44 @@ public final class SpectraProfileCommand {
             };
 
             Runnable spatial = () -> engine.forEachMatchingInRange(receiver, RANGE, (emitter, current, distanceSquared) -> sink[0] += distanceSquared);
+            Runnable indexedSpatial = () -> index.forEachWithin(
+                    receiverWorld.x, receiverWorld.y, receiverWorld.z, RANGE,
+                    emitter -> {
+                        if (!emitter.isEmitting()) {
+                            return;
+                        }
+
+                        FrequencySignal current = emitter.signal();
+                        if (current.frequencyHz() != FREQUENCY) {
+                            return;
+                        }
+
+                        Vec3 world = FrequencySpace.worldPosition(level, emitter.position());
+                        double distanceSquared = world.distanceToSqr(receiverWorld);
+
+                        if (distanceSquared <= RANGE * RANGE) {
+                            sink[0] += distanceSquared;
+                        }
+                    }
+            );
             Runnable reception = () -> engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distanceSquared, amplitude, travelTime) -> sink[0] += amplitude + travelTime);
 
             measure(count, "LOOKUP", lookup, memory);
             measure(count, "RAW_DISTANCE", rawDistance, memory);
             measure(count, "PROJECTION", projection, memory);
             measure(count, "SPATIAL", spatial, memory);
+            measure(count, "SPATIAL_INDEX_SNAPSHOT", indexedSpatial, memory);
             measure(count, "RECEPTION", reception, memory);
 
             Runnable worldMaterials = () -> {
                 for (Vec3 emitterWorld : paths) {
-                    sink[0] += FrequencyMaterialAttenuation.factor(
-                            level, emitterWorld, receiverWorld
-                    );
+                    sink[0] += FrequencyMaterialAttenuation.factor(level, emitterWorld, receiverWorld);
                 }
             };
 
             Runnable sableMaterials = () -> {
                 for (Vec3 emitterWorld : paths) {
-                    sink[0] += FrequencySableMaterialAttenuation.factor(
-                            level, emitterWorld, receiverWorld
-                    );
+                    sink[0] += FrequencySableMaterialAttenuation.factor(level, emitterWorld, receiverWorld);
                 }
             };
 
@@ -159,8 +200,6 @@ public final class SpectraProfileCommand {
                 }
             };
 
-            measure(count, "WORLD_MATERIAL_ONLY", worldMaterials, memory);
-            measure(count, "SABLE_MATERIAL_ONLY", sableMaterials, memory);
             measure(count, "WORLD_MATERIAL_ONLY", worldMaterials, memory);
             measure(count, "SABLE_MATERIAL_ONLY", sableMaterials, memory);
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);
@@ -191,13 +230,12 @@ public final class SpectraProfileCommand {
         return bean;
     }
 
-    private static void measure(int count, String stage, Runnable task,
-                                ThreadMXBean memory) {
-        for (int i = 0; i < 3; i++) {
+    private static void measure(int count, String stage, Runnable task, ThreadMXBean memory) {
+        for (int i = 0; i < 20; i++) {
             task.run();
         }
 
-        double[] samples = new double[5];
+        double[] samples = new double[9];
         double allocated = 0.0;
         long threadId = Thread.currentThread().threadId();
 

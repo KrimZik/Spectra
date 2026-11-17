@@ -10,7 +10,31 @@ final class FrequencySpatialIndex<T> {
     private static final double CELL_METERS = 32.0;
     private static final long MAX_ENUMERATED_CELLS = 8192L;
 
-    private record Cell(int x, int y, int z) {}
+    private static final class Cell {
+        int x;
+        int y;
+        int z;
+
+        Cell(int x, int y, int z) {
+            set(x, y, z);
+        }
+
+        void set(int x, int y, int z) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Cell cell && x == cell.x && y == cell.y && z == cell.z;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (31 * x + y) + z;
+        }
+    }
 
     private static final class Entry<T> {
         final T endpoint;
@@ -36,6 +60,65 @@ final class FrequencySpatialIndex<T> {
 
     int size() {
         return entries.size();
+    }
+
+    boolean favorsIndex(double x, double y, double z, double radiusMeters, int matchingCandidates) {
+        if (matchingCandidates < 512 || !Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z) || !Double.isFinite(radiusMeters) || radiusMeters < 0.0) {
+            return false;
+        }
+
+        double minX = Math.floor((x - radiusMeters) / CELL_METERS);
+        double minY = Math.floor((y - radiusMeters) / CELL_METERS);
+        double minZ = Math.floor((z - radiusMeters) / CELL_METERS);
+        double maxX = Math.floor((x + radiusMeters) / CELL_METERS);
+        double maxY = Math.floor((y + radiusMeters) / CELL_METERS);
+        double maxZ = Math.floor((z + radiusMeters) / CELL_METERS);
+
+        if (!fitsCellCoordinate(minX) || !fitsCellCoordinate(minY) || !fitsCellCoordinate(minZ) || !fitsCellCoordinate(maxX) || !fitsCellCoordinate(maxY) || !fitsCellCoordinate(maxZ)) {
+            return false;
+        }
+
+        int x0 = (int) minX;
+        int y0 = (int) minY;
+        int z0 = (int) minZ;
+        int x1 = (int) maxX;
+        int y1 = (int) maxY;
+        int z1 = (int) maxZ;
+
+        long nx = (long) x1 - x0 + 1;
+        long ny = (long) y1 - y0 + 1;
+        long nz = (long) z1 - z0 + 1;
+
+        if (nx > MAX_ENUMERATED_CELLS || ny > MAX_ENUMERATED_CELLS || nz > MAX_ENUMERATED_CELLS) {
+            return false;
+        }
+
+        long cellCount = nx * ny * nz;
+        if (cellCount > MAX_ENUMERATED_CELLS || cellCount * 2 >= entries.size()) {
+            return false;
+        }
+
+        int limit = Math.max(1, matchingCandidates / 12);
+        int candidates = 0;
+        Cell lookup = new Cell(0, 0, 0);
+
+        for (long cx = x0; cx <= x1; cx++) {
+            for (long cy = y0; cy <= y1; cy++) {
+                for (long cz = z0; cz <= z1; cz++) {
+                    lookup.set((int) cx, (int) cy, (int) cz);
+
+                    ArrayList<Entry<T>> bucket = cells.get(lookup);
+                    if (bucket != null) {
+                        candidates += bucket.size();
+                        if (candidates > limit) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 
     void update(T endpoint, double worldX, double worldY, double worldZ) {
@@ -129,10 +212,12 @@ final class FrequencySpatialIndex<T> {
                 return;
             }
 
+            Cell lookup = new Cell(0, 0, 0);
             for (long cx = x0; cx <= x1; cx++) {
                 for (long cy = y0; cy <= y1; cy++) {
                     for (long cz = z0; cz <= z1; cz++) {
-                        ArrayList<Entry<T>> bucket = cells.get(new Cell((int) cx, (int) cy, (int) cz));
+                        lookup.set((int) cx, (int) cy, (int) cz);
+                        ArrayList<Entry<T>> bucket = cells.get(lookup);
 
                         if (bucket == null) {
                             continue;
@@ -170,7 +255,7 @@ final class FrequencySpatialIndex<T> {
             return Math.hypot(Math.hypot(dx, dy), dz) <= radius;
         }
 
-        return Math.fma(dx, dx, Math.fma(dy, dy, dz * dz)) <= radius * radius;
+        return dx * dx + dy * dy + dz * dz <= radius * radius;
     }
 
     private void attach(Entry<T> entry, Cell cell) {

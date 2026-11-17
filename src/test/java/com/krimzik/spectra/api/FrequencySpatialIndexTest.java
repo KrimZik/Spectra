@@ -156,4 +156,45 @@ class FrequencySpatialIndexTest {
         assertEquals(0, index.size());
         System.out.printf(Locale.ROOT, "entries=%d " + "queries=%d " + "registration=%.3f ms " + "verification=%.3f ms " + "bruteForceComparison=PASS " + "cleanup=PASS%n", count, queries, registrationMs, verificationMs);
     }
+
+    @Test
+    void reusedLookupPreservesStoredCellsAndNegativeCoordinates() {
+        FrequencySpatialIndex<Object> index = new FrequencySpatialIndex<>();
+
+        Object west = new Object();
+        Object east = new Object();
+
+        index.update(west, -32.0, 0.0, 0.0);
+        index.update(east, 32.0, 0.0, 0.0);
+
+        for (int i = 0; i < 300; i++) {
+            index.update(new Object(), 2048.0 + i, 0.0, 0.0);
+        }
+
+        for (int i = 0; i < 10; i++) {
+            List<Object> found = new ArrayList<>();
+            index.forEachWithin(0.0, 0.0, 0.0, 32.0, found::add);
+
+            assertEquals(2, found.size());
+            assertTrue(found.stream().anyMatch(value -> value == west));
+            assertTrue(found.stream().anyMatch(value -> value == east));
+        }
+
+        index.update(west, -33.0, 0.0, 0.0);
+
+        List<Object> afterMove = new ArrayList<>();
+        index.forEachWithin(0.0, 0.0, 0.0, 32.0, afterMove::add);
+
+        assertEquals(1, afterMove.size());
+        assertSame(east, afterMove.getFirst());
+
+        index.remove(east);
+        index.update(west, -32.0, 0.0, 0.0);
+
+        List<Object> afterRemoval = new ArrayList<>();
+        index.forEachWithin(0.0, 0.0, 0.0, 32.0, afterRemoval::add);
+
+        assertEquals(1, afterRemoval.size());
+        assertSame(west, afterRemoval.getFirst());
+    }
 }

@@ -8,6 +8,9 @@ import net.minecraft.world.phys.Vec3;
 
 public interface FrequencyEmitter extends FrequencyEndpoint {
     FrequencySignal signal();
+    default boolean hasFixedWorldPosition() {
+        return false;
+    }
     default boolean isEmitting() {
         return true;
     }

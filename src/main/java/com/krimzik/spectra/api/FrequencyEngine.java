@@ -38,6 +38,9 @@ public final class FrequencyEngine {
     private final FrequencySpatialIndex<FrequencyReceiver> receiverSpatialIndex = new FrequencySpatialIndex<>();
     private final LinkedHashSet<ReceiverRegistration> pendingReceiverSpatialRefreshes = new LinkedHashSet<>();
     private final NavigableMap<Double, FrequencyBucket> byFrequency = new TreeMap<>();
+    private final NavigableMap<Double, FrequencyBucket> liveByFrequency = new TreeMap<>();
+    private final FrequencySpatialIndex<FrequencyEmitter> fixedEmitterSpatialIndex = new FrequencySpatialIndex<>();
+    private final IdentityHashMap<FrequencyEmitter, Vec3> fixedEmitterPositions = new IdentityHashMap<>();
     private final IdentityHashMap<FrequencyEmitter, EmitterMotionSample> emitterMotionSamples = new IdentityHashMap<>();
     private final Map<Long, Set<FrequencyRegistration>> chunkRegistrations = new HashMap<>();
     private final Map<Entity, Set<FrequencyRegistration>> entityRegistrations = new IdentityHashMap<>();
@@ -103,6 +106,12 @@ public final class FrequencyEngine {
                 Double frequency = emitters.remove(emitter);
                 if (frequency != null) {
                     removeFromIndex(emitter, frequency);
+
+                    if (fixedEmitterPositions.remove(emitter) != null) {
+                        fixedEmitterSpatialIndex.remove(emitter);
+                    } else {
+                        removeFromLiveIndex(emitter, frequency);
+                    }
                 }
 
                 emitterMotionSamples.remove(emitter);
@@ -739,7 +748,15 @@ public final class FrequencyEngine {
         FrequencySignal signal = Objects.requireNonNull(emitter.signal());
         double frequency = signal.frequencyHz();
 
+        Vec3 fixedWorldPosition = ownerChunk != null && emitter.hasFixedWorldPosition() ? Objects.requireNonNull(FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()))) : null;
         EmitterRegistration registration = new EmitterRegistration(emitter, ownerChunk, ownerEntity);
+
+        if (fixedWorldPosition != null) {
+            fixedEmitterSpatialIndex.update(emitter, fixedWorldPosition.x, fixedWorldPosition.y, fixedWorldPosition.z);
+            fixedEmitterPositions.put(emitter, fixedWorldPosition);
+        } else {
+            addToLiveIndex(emitter, frequency);
+        }
 
         emitters.put(emitter, frequency);
         addToIndex(emitter, frequency);
@@ -966,6 +983,11 @@ public final class FrequencyEngine {
 
         removeFromIndex(emitter, previousFrequency);
         addToIndex(emitter, newFrequency);
+
+        if (!fixedEmitterPositions.containsKey(emitter)) {
+            removeFromLiveIndex(emitter, previousFrequency);
+            addToLiveIndex(emitter, newFrequency);
+        }
 
         emitters.put(emitter, newFrequency);
     }
@@ -1275,46 +1297,88 @@ public final class FrequencyEngine {
         double rangeSquared = rangeMeters * rangeMeters;
 
         Vec3 receiverPos = Objects.requireNonNull(receiver.position());
-        Vec3 receiverWorldPos = FrequencySpace.worldPosition(level, receiverPos);
+        NavigableMap<Double, FrequencyBucket> matchingBuckets = byFrequency.subMap(minFrequency, true, maxFrequency, true);
 
+        if (matchingBuckets.isEmpty()) {
+            return;
+        }
+
+        Vec3 receiverWorldPos = FrequencySpace.worldPosition(level, receiverPos);
         activeQueries++;
 
         try {
-            for (FrequencyBucket bucket : byFrequency.subMap(minFrequency, true, maxFrequency, true).values()) {
-                for (int i = 0; i < bucket.size; i++) {
-                    FrequencyEmitter emitter = bucket.get(i);
-                    if (!emitter.isEmitting()) {
-                        continue;
+            int fixedCandidates = 0;
+
+            if (fixedEmitterSpatialIndex.size() >= 512) {
+                for (Map.Entry<Double, FrequencyBucket> entry : matchingBuckets.entrySet()) {
+                    FrequencyBucket live = liveByFrequency.get(entry.getKey());
+                    fixedCandidates += entry.getValue().size - (live == null ? 0 : live.size);
+                }
+            }
+
+            boolean useIndex = fixedEmitterSpatialIndex.favorsIndex(receiverWorldPos.x, receiverWorldPos.y, receiverWorldPos.z, rangeMeters, fixedCandidates);
+            if (useIndex) {
+                for (FrequencyBucket bucket : liveByFrequency.subMap(minFrequency, true, maxFrequency, true).values()) {
+                    for (int i = 0; i < bucket.size; i++) {
+                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null);
                     }
+                }
 
-                    FrequencySignal signal = Objects.requireNonNull(emitter.signal());
-                    if (Math.abs(signal.frequencyHz() - frequency) > tolerance) {
-                        continue;
-                    }
-
-                    Vec3 emitterPos = Objects.requireNonNull(emitter.position());
-                    Vec3 emitterWorldPos = FrequencySpace.worldPosition(level, emitterPos);
-                    double distanceSquared = emitterWorldPos.distanceToSqr(receiverWorldPos);
-
-                    if (!(distanceSquared <= rangeSquared)) {
-                        continue;
-                    }
-
-                    if (receptionConsumer == null) {
-                        matchConsumer.accept(emitter, signal, distanceSquared);
-                    } else {
-                        double distance = Math.sqrt(distanceSquared);
-                        double amplitude = FrequencyPropagation.amplitudeAtDistance(signal.amplitude(), distance);
-                        amplitude *= pathAttenuation.factor(emitterWorldPos, receiverWorldPos);
-
-                        double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());
-                        receptionConsumer.accept(emitter, signal, distanceSquared, amplitude, travelTime);
+                fixedEmitterSpatialIndex.forEachWithin(
+                        receiverWorldPos.x,
+                        receiverWorldPos.y,
+                        receiverWorldPos.z,
+                        rangeMeters,
+                        emitter -> {
+                            Double registeredFrequency = emitters.get(emitter);
+                            if (registeredFrequency != null && registeredFrequency >= minFrequency && registeredFrequency <= maxFrequency) {
+                                acceptRangeCandidate(emitter, receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, fixedEmitterPositions.get(emitter));
+                            }
+                        }
+                );
+            } else {
+                for (FrequencyBucket bucket : matchingBuckets.values()) {
+                    for (int i = 0; i < bucket.size; i++) {
+                        acceptRangeCandidate(bucket.get(i), receiverWorldPos, frequency, tolerance, rangeSquared, matchConsumer, receptionConsumer, null);
                     }
                 }
             }
         } finally {
             activeQueries--;
         }
+    }
+
+    private void acceptRangeCandidate(FrequencyEmitter emitter, Vec3 receiverWorldPos, double frequency, double tolerance, double rangeSquared, FrequencyMatchConsumer matchConsumer, FrequencyReceptionConsumer receptionConsumer, Vec3 fixedWorldPosition) {
+        if (!emitter.isEmitting()) {
+            return;
+        }
+
+        FrequencySignal signal = Objects.requireNonNull(emitter.signal());
+        if (Math.abs(signal.frequencyHz() - frequency) > tolerance) {
+            return;
+        }
+
+        Vec3 emitterWorldPos = fixedWorldPosition != null ? fixedWorldPosition : FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
+
+        double distanceSquared = emitterWorldPos.distanceToSqr(receiverWorldPos);
+        if (!(distanceSquared <= rangeSquared)) {
+            return;
+        }
+
+        if (receptionConsumer == null) {
+            matchConsumer.accept(emitter, signal, distanceSquared);
+            return;
+        }
+
+        double distance = Math.sqrt(distanceSquared);
+        double amplitude = FrequencyPropagation.amplitudeAtDistance(signal.amplitude(), distance);
+
+        if (amplitude != 0.0) {
+            amplitude *= pathAttenuation.factor(emitterWorldPos, receiverWorldPos);
+        }
+
+        double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());
+        receptionConsumer.accept(emitter, signal, distanceSquared, amplitude, travelTime);
     }
 
     public double sampleResonanceInRange(FrequencyReceiver receiver, double rangeMeters, double timeSeconds, double naturalFrequencyHz, double dampingRatio) {
@@ -1477,6 +1541,9 @@ public final class FrequencyEngine {
         receiverSpatialIndex.clear();
         pendingReceiverSpatialRefreshes.clear();
         byFrequency.clear();
+        liveByFrequency.clear();
+        fixedEmitterSpatialIndex.clear();
+        fixedEmitterPositions.clear();
         emitterMotionSamples.clear();
         chunkRegistrations.clear();
         entityRegistrations.clear();
@@ -1559,6 +1626,17 @@ public final class FrequencyEngine {
         }
     }
 
+    private void addToLiveIndex(FrequencyEmitter emitter, double frequency) {
+        liveByFrequency.computeIfAbsent(frequency, unused -> new FrequencyBucket()).add(emitter);
+    }
+
+    private void removeFromLiveIndex(FrequencyEmitter emitter, double frequency) {
+        FrequencyBucket bucket = liveByFrequency.get(frequency);
+
+        if (bucket != null && bucket.remove(emitter) && bucket.size == 0) {
+            liveByFrequency.remove(frequency);
+        }
+    }
 
     private void addToIndex(FrequencyEmitter emitter, double frequency) {
         byFrequency.computeIfAbsent(frequency, unused -> new FrequencyBucket()).add(emitter);

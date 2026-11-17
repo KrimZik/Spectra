@@ -47,6 +47,10 @@ class FrequencyReceptionConsistencyTest {
     }
 
     private static Fixture fixture() {
+        return fixture(1.0);
+    }
+
+    private static Fixture fixture(double amplitude) {
         MinecraftServer server = mock(MinecraftServer.class);
         ServerLevel level = mock(ServerLevel.class);
         ServerChunkCache chunks = mock(ServerChunkCache.class);
@@ -65,7 +69,7 @@ class FrequencyReceptionConsistencyTest {
         });
 
         FrequencyEngine engine = new FrequencyEngine(level);
-        engine.register(new Emitter(new Vec3(0.5, 64.5, 0.5), new FrequencySignal(123.0, 1.0, 0.7, 100.0)));
+        engine.register(new Emitter(new Vec3(0.5, 64.5, 0.5), new FrequencySignal(123.0, amplitude, 0.7, 100.0)));
 
         Receiver receiver = new Receiver(123.0, 0.0, new Vec3(3.5, 64.5, 0.5));
 
@@ -164,6 +168,50 @@ class FrequencyReceptionConsistencyTest {
             f.engine().forEachMatchingInRange(f.receiver(), RANGE, (emitter, signal, distanceSquared) -> matches[0]++);
 
             assertEquals(1, matches[0]);
+        } finally {
+            f.engine().shutdown();
+        }
+    }
+
+    @Test
+    void unrelatedFrequencyDoesNotProjectReceiverPosition() {
+        Fixture f = fixture();
+        Receiver unmatched = new Receiver(999.0, 0.0, f.receiver().position());
+
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class)) {
+            f.engine().forEachReceivedInRange(unmatched, RANGE, (emitter, signal, distanceSquared, amplitude, travelTime) -> fail("Unexpected reception"));
+            space.verifyNoInteractions();
+        } finally {
+            f.engine().shutdown();
+        }
+    }
+
+    @Test
+    void zeroAmplitudePreservesReceptionWithoutMaterialTraversal() {
+        Fixture f = fixture(0.0);
+
+        try (MockedStatic<FrequencySpace> space = mockStatic(FrequencySpace.class);
+             MockedStatic<FrequencySableMaterialAttenuation> sable = mockStatic(FrequencySableMaterialAttenuation.class)) {
+
+            space.when(() -> FrequencySpace.worldPosition(eq(f.level()), any(Vec3.class))).thenAnswer(call -> call.getArgument(1));
+            FrequencyMaterialAttenuation.setEnabled(true);
+            clearInvocations(f.level());
+
+            int[] received = {0};
+
+            f.engine().forEachReceivedInRange(
+                    f.receiver(), RANGE,
+                    (emitter, signal, distanceSquared, amplitude, travelTime) -> {
+                        received[0]++;
+                        assertEquals(9.0, distanceSquared, EPSILON);
+                        assertEquals(0.0, amplitude, 0.0);
+                        assertEquals(0.03, travelTime, EPSILON);
+                    }
+            );
+
+            assertEquals(1, received[0]);
+            verify(f.level(), never()).getChunkSource();
+            sable.verifyNoInteractions();
         } finally {
             f.engine().shutdown();
         }
