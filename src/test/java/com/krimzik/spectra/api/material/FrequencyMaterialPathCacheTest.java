@@ -633,4 +633,103 @@ class FrequencyMaterialPathCacheTest {
 
         verify(source, times(2)).getChunkNow(0, 0);
     }
+
+    @Test
+    void nestedReceptionBatchPreservesOuterCacheAfterException() {
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer discard = (materialId, from, to, axes) -> {};
+
+        clearInvocations(source);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+            FrequencyMaterialAttenuation.beginChunkBatch(level);
+            try {
+                assertThrows(IllegalStateException.class, () -> FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, (materialId, from, to, axes) -> {
+                    throw new IllegalStateException("Expected failure");
+                }));
+            } finally {
+                FrequencyMaterialAttenuation.endChunkBatch();
+            }
+
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(1)).getChunkNow(0, 0);
+
+        clearInvocations(source);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(1)).getChunkNow(0, 0);
+    }
+
+    @Test
+    void nestedDifferentLevelDoesNotReuseOuterChunks() {
+        ServerLevel otherLevel = mock(ServerLevel.class);
+        ServerChunkCache otherSource = mock(ServerChunkCache.class);
+        LevelChunk otherChunk = mock(LevelChunk.class);
+
+        LevelChunkSection[] otherSections = new LevelChunkSection[24];
+        otherSections[8] = section;
+
+        when(otherLevel.getChunkSource()).thenReturn(otherSource);
+        when(otherLevel.getMinBuildHeight()).thenReturn(-64);
+        when(otherLevel.getMaxBuildHeight()).thenReturn(320);
+        when(otherSource.getChunkNow(anyInt(), anyInt())).thenReturn(otherChunk);
+        when(otherChunk.getSections()).thenReturn(otherSections);
+
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer discard = (materialId, from, to, axes) -> {};
+
+        clearInvocations(source, otherSource);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+
+            FrequencyMaterialAttenuation.beginChunkBatch(otherLevel);
+            try {
+                FrequencyMaterialAttenuation.factorWithMaterials(otherLevel, start, end, discard);
+                FrequencyMaterialAttenuation.factorWithMaterials(otherLevel, start, end, discard);
+            } finally {
+                FrequencyMaterialAttenuation.endChunkBatch();
+            }
+
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(1)).getChunkNow(0, 0);
+        verify(otherSource, times(2)).getChunkNow(0, 0);
+    }
+
+    @Test
+    void collidingChunkCacheSlotsNeverReturnWrongCoordinates() {
+        Vec3 distantStart = new Vec3(114 * 16.0 + 0.5, 64.5, 0.5);
+        Vec3 distantEnd = new Vec3(114 * 16.0 + 2.5, 64.5, 0.5);
+
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer discard = (materialId, from, to, axes) -> {};
+
+        clearInvocations(source);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+            FrequencyMaterialAttenuation.factorWithMaterials(level, distantStart, distantEnd, discard);
+            FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(2)).getChunkNow(0, 0);
+        verify(source, times(1)).getChunkNow(114, 0);
+    }
 }

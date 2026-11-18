@@ -457,6 +457,25 @@ public final class SpectraProfileCommand {
                 }
             };
 
+            MinecraftMaterialPropagation diagnosticBatch = new MinecraftMaterialPropagation(level);
+            Runnable rawWorldBatched = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    Vec3 end = stationary[i].position();
+
+                    diagnosticBatch.beginReceptionChunkBatch();
+                    try {
+                        for (Vec3 start : emitterPositions) {
+                            double result = FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+                            if (Double.isFinite(result)) {
+                                sink[0] += result;
+                            }
+                        }
+                    } finally {
+                        diagnosticBatch.endReceptionChunkBatch();
+                    }
+                }
+            };
+
             Runnable rawFactorOnly = () -> {
                 for (int i = 0; i < diagnosticReceivers; i++) {
                     Vec3 end = stationary[i].position();
@@ -506,6 +525,7 @@ public final class SpectraProfileCommand {
             };
 
             measurePathDiagnostic("RAW_WORLD_PATH", rawWorld, diagnosticReceivers, emitterCount, memory);
+            measurePathDiagnostic("RAW_WORLD_BATCHED", rawWorldBatched, diagnosticReceivers, emitterCount, memory);
             measurePathDiagnostic("CHUNK_LOOKUP_ONLY", chunkLookupOnly, diagnosticReceivers, emitterCount, memory);
             measurePathDiagnostic("RAW_FACTOR_ONLY", rawFactorOnly, diagnosticReceivers, emitterCount, memory);
             measurePathDiagnostic("CACHED_WORLD_WAVE", cachedWorld, diagnosticReceivers, emitterCount, memory);
