@@ -109,4 +109,19 @@ public class FrequencySimulationTest {
 
         assertEquals(expected, actual, 1.0e-12);
     }
+
+    @Test
+    void continuousPhasePreservesInitialPhaseAfterLongRuntime() {
+        double phase = FrequencyMath.phase(1_000_000_000.0, 10_000_000.0, Math.PI / 2.0);
+        assertEquals(Math.PI / 2.0, phase, 1.0e-12);
+    }
+
+    @Test
+    void continuousReceptionPreservesSubNanosecondDelay() {
+        double frequency = 1_000_000_000.0;
+        double delay = 0.25 / frequency;
+        double sample = FrequencyPropagation.sampleReceived(frequency, 1.0, 0.0, 10_000_000.0, delay);
+
+        assertEquals(-1.0, sample, 1.0e-12);
+    }
 }

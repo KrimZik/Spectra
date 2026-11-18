@@ -22,9 +22,19 @@ public final class FrequencyMath {
     }
 
     public static double phase(double hz, double timeSeconds, double initialPhase) {
-        double cycles = Math.fma(hz, timeSeconds, initialPhase / TWO_PI);
-        double fractional = cycles - Math.floor(cycles);
-        return fractional * TWO_PI;
+        return phaseAtTime(hz, timeSeconds, initialPhase, 0.0);
+    }
+
+    public static double phaseAtTime(double hz, double timeSeconds, double initialPhase, double delaySeconds) {
+        if (!Double.isFinite(hz) || hz <= 0.0 || !Double.isFinite(timeSeconds) || !Double.isFinite(initialPhase) || !Double.isFinite(delaySeconds) || delaySeconds < 0.0) {
+            throw new IllegalArgumentException("Invalid phase parameters");
+        }
+
+        double timeCycles = fractionalProduct(hz, timeSeconds);
+        double delayCycles = delaySeconds == 0.0 ? 0.0 : fractionalProduct(hz, delaySeconds);
+        double initialCycles = fractionalCycles((initialPhase % TWO_PI) / TWO_PI);
+
+        return fractionalCycles(timeCycles - delayCycles + initialCycles) * TWO_PI;
     }
 
     public static double sampleSine(double hz, double amplitude, double initialPhase, double timeSeconds) {

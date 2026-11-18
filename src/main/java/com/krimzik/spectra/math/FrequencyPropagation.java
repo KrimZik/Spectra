@@ -30,6 +30,6 @@ public final class FrequencyPropagation {
     }
 
     public static double sampleReceived(double frequencyHz, double receivedAmplitude, double initialPhaseRadians, double timeSeconds, double travelTimeSeconds) {
-        return FrequencyMath.sampleSine(frequencyHz, receivedAmplitude, initialPhaseRadians, timeSeconds - travelTimeSeconds);
+        return receivedAmplitude * Math.sin(FrequencyMath.phaseAtTime(frequencyHz, timeSeconds, initialPhaseRadians, travelTimeSeconds));
     }
 }
