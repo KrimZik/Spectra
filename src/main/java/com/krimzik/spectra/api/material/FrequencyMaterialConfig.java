@@ -39,15 +39,15 @@ public final class FrequencyMaterialConfig {
 
         builder.push("waves");
         REFLECTION = builder
-                .comment("Enable wave reflection.")
+                .comment("Enable reflection.")
                 .define("reflectionEnabled", true);
 
         REFRACTION = builder
-                .comment("Enable wave refraction.")
+                .comment("Enable refraction.")
                 .define("refractionEnabled", true);
 
         DIFFRACTION = builder
-                .comment("Enable wave diffraction.")
+                .comment("Enable diffraction.")
                 .define("diffractionEnabled", true);
         builder.pop();
 

@@ -1,7 +1,9 @@
 package com.krimzik.spectra.api.material;
 
 import com.krimzik.spectra.propagation.PathAttenuation;
+import com.krimzik.spectra.propagation.geometry.MaterialBoundaryScanner;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
@@ -31,6 +33,14 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
         return world * ships;
     }
 
+    public double factorWithWorldBoundaries(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
+        return worldCache.factorWithBoundaries(start, end, consumer);
+    }
+
+    public double factorWithWorldSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        return worldCache.factorWithSegments(start, end, consumer);
+    }
+
     public void clearCachedPaths() {
         worldCache.clear();
     }
@@ -43,6 +53,10 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
 
     public List<? extends SubLevelAccess> receiverCandidates(Vec3 receiver, double rangeMeters) {
         return FrequencySableMaterialAttenuation.receiverCandidates(level, receiver, rangeMeters);
+    }
+
+    public List<? extends SubLevelAccess> waveReceiverCandidates(Vec3 receiver, double rangeMeters) {
+        return FrequencySableMaterialAttenuation.waveReceiverCandidates(level, receiver, rangeMeters);
     }
 
     public double factor(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates) {

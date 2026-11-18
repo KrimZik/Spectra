@@ -31,6 +31,7 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
     private final List<Rule> tags;
     private final Map<ResourceLocation, WaveMedium> materials;
     private volatile ConcurrentHashMap<BlockState, WaveMedium> cache = new ConcurrentHashMap<>();
+    private volatile ConcurrentHashMap<ResourceLocation, WaveMedium> materialCache = new ConcurrentHashMap<>();
     private volatile long cacheRevision = FrequencyMaterialRules.revision();
 
     public MinecraftWaveMediumResolver(WaveMedium fallback, List<Rule> rules) {
@@ -74,13 +75,53 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
             throw new IllegalArgumentException("Invalid frequency");
         }
 
-        long revision = FrequencyMaterialRules.revision();
-        if (cacheRevision != revision) {
-            cache = new ConcurrentHashMap<>();
-            cacheRevision = revision;
+        refreshCaches();
+        return cache.computeIfAbsent(state, this::resolveUncached);
+    }
+
+    public WaveMedium resolveMaterial(ResourceLocation material, double frequencyHz) {
+        Objects.requireNonNull(material);
+
+        if (!Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            throw new IllegalArgumentException("Invalid frequency");
         }
 
-        return cache.computeIfAbsent(state, this::resolveUncached);
+        refreshCaches();
+        return namedMaterial(material);
+    }
+
+    public boolean hasStateSpecificRules() {
+        return !blocks.isEmpty() || !tags.isEmpty();
+    }
+
+    private void refreshCaches() {
+        long revision = FrequencyMaterialRules.revision();
+
+        if (cacheRevision != revision) {
+            cache = new ConcurrentHashMap<>();
+            materialCache = new ConcurrentHashMap<>();
+            cacheRevision = revision;
+        }
+    }
+
+    private WaveMedium namedMaterial(ResourceLocation material) {
+        WaveMedium cached = materialCache.get(material);
+        return cached != null ? cached : materialCache.computeIfAbsent(material, this::resolveNamedMaterial);
+    }
+
+    private WaveMedium resolveNamedMaterial(ResourceLocation material) {
+        WaveMedium base = materials.getOrDefault(material, fallback);
+        FrequencyMaterialRules.Properties properties = FrequencyMaterialRules.properties(material);
+
+        if (properties == null) {
+            return base;
+        }
+
+        double speed = properties.speedMetersPerSecond() != null ? properties.speedMetersPerSecond() : base.speedMetersPerSecond();
+        double impedance = properties.impedance() != null ? properties.impedance() : base.impedance();
+        double loss = properties.decibelsPerMeter() != null ? properties.decibelsPerMeter() : base.lossDbPerMeter();
+
+        return new WaveMedium(speed, impedance, loss);
     }
 
     private WaveMedium resolveUncached(BlockState state) {
@@ -97,18 +138,13 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
         }
 
         ResourceLocation material = FrequencyMaterialClassifier.classify(state);
-        WaveMedium base = materials.getOrDefault(material, fallback);
-        FrequencyMaterialRules.Properties properties = FrequencyMaterialRules.properties(material);
+        WaveMedium base = namedMaterial(material);
         Double overrideLoss = FrequencyMaterialRules.overrideLoss(state);
 
-        if (properties == null && overrideLoss == null) {
+        if (overrideLoss == null) {
             return base;
         }
 
-        double speed = properties != null && properties.speedMetersPerSecond() != null ? properties.speedMetersPerSecond() : base.speedMetersPerSecond();
-        double impedance = properties != null && properties.impedance() != null ? properties.impedance() : base.impedance();
-        double loss = overrideLoss != null ? overrideLoss : properties != null && properties.decibelsPerMeter() != null ? properties.decibelsPerMeter() : base.lossDbPerMeter();
-
-        return new WaveMedium(speed, impedance, loss);
+        return new WaveMedium(base.speedMetersPerSecond(), base.impedance(), overrideLoss);
     }
 }

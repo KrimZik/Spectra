@@ -1,15 +1,19 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.propagation.geometry.MaterialBoundaryScanner;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Objects;
 
 final class FrequencyMaterialPathCache {
     private static final int MAX_ENTRIES = 16_384;
     private static final int ADMISSION_SLOTS = 1 << 14;
+    private static final int MAX_CACHED_BOUNDARIES = 128;
 
     private final ServerLevel level;
     private final HashMap<Vec3, HashMap<Vec3, Entry>> entries = new HashMap<>();
@@ -40,25 +44,7 @@ final class FrequencyMaterialPathCache {
 
         if (entry == null) {
             coldMisses++;
-
-            if (size >= MAX_ENTRIES && !repeatCandidate(start, end)) {
-                return FrequencyMaterialAttenuation.factor(level, start, end);
-            }
-
-            if (row == null) {
-                row = new HashMap<>();
-                entries.put(end, row);
-            }
-
-            entry = new Entry(start, end);
-            row.put(start, entry);
-            link(entry);
-            size++;
-
-            if (size > MAX_ENTRIES) {
-                evict();
-            }
-
+            admit(start, end, row);
             return FrequencyMaterialAttenuation.factor(level, start, end);
         }
 
@@ -70,14 +56,17 @@ final class FrequencyMaterialPathCache {
             if (entry.rulesRevision != revision) {
                 rulesInvalidations++;
             } else if (entry.trace.current()) {
-                cacheHits++;
-                return entry.factor;
+                if (Double.isFinite(entry.factor)) {
+                    cacheHits++;
+                    return entry.factor;
+                }
             } else {
                 sectionInvalidations++;
             }
         }
 
         traceBuilds++;
+        entry.boundaryGeometry = null;
         Trace trace = new Trace();
         double result = FrequencyMaterialAttenuation.factorWithTrace(level, start, end, trace);
 
@@ -88,6 +77,113 @@ final class FrequencyMaterialPathCache {
         } else {
             failedTraces++;
             entry.trace = null;
+        }
+
+        return result;
+    }
+
+    private Entry admit(Vec3 start, Vec3 end, HashMap<Vec3, Entry> row) {
+        if (size >= MAX_ENTRIES && !repeatCandidate(start, end)) {
+            return null;
+        }
+
+        if (row == null) {
+            row = new HashMap<>();
+            entries.put(end, row);
+        }
+
+        Entry entry = new Entry(start, end);
+        row.put(start, entry);
+        link(entry);
+
+        size++;
+        if (size > MAX_ENTRIES) {
+            evict();
+        }
+
+        return entry;
+    }
+
+    double factorWithBoundaries(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
+        Objects.requireNonNull(consumer);
+        return factorWithMaterialData(start, end, consumer, null);
+    }
+
+    double factorWithSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(consumer);
+        return factorWithMaterialData(start, end, null, consumer);
+    }
+
+    private double factorWithMaterialData(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> boundaryConsumer, FrequencyMaterialAttenuation.MaterialSegmentConsumer segmentConsumer) {
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+
+        HashMap<Vec3, Entry> row = entries.get(end);
+        Entry entry = row == null ? null : row.get(start);
+
+        if (entry == null) {
+            coldMisses++;
+            entry = admit(start, end, row);
+        } else {
+            touch(entry);
+        }
+
+        long revision = FrequencyMaterialRules.revision();
+        boolean enabled = FrequencyMaterialAttenuation.enabled();
+
+        if (entry != null && entry.trace != null) {
+            if (entry.rulesRevision != revision) {
+                rulesInvalidations++;
+            } else if (!entry.trace.current()) {
+                sectionInvalidations++;
+            } else if (entry.boundaryGeometry != null
+                    && (!enabled || Double.isFinite(entry.factor))) {
+                cacheHits++;
+
+                if (boundaryConsumer != null) {
+                    entry.boundaryGeometry.replay(boundaryConsumer);
+                } else {
+                    entry.boundaryGeometry.replaySegments(segmentConsumer);
+                }
+
+                return enabled ? entry.factor : 1.0;
+            }
+        }
+
+        BoundaryRecorder recorder = new BoundaryRecorder();
+        MaterialBoundaryCollector collector = new MaterialBoundaryCollector(recorder);
+        Trace trace = entry == null ? null : new Trace();
+
+        if (trace != null) {
+            traceBuilds++;
+        }
+
+        double result = FrequencyMaterialAttenuation.factorWithTraceAndMaterials(level, start, end, trace, collector);
+
+        if (entry != null) {
+            entry.trace = null;
+            entry.boundaryGeometry = null;
+            entry.factor = Double.NaN;
+
+            if (Double.isFinite(result) && trace.cacheable && revision == FrequencyMaterialRules.revision() && trace.current()) {
+                entry.factor = enabled ? result : Double.NaN;
+                entry.rulesRevision = revision;
+                entry.trace = trace;
+
+                if (recorder.count() <= MAX_CACHED_BOUNDARIES) {
+                    entry.boundaryGeometry = recorder.snapshot(collector.firstMaterial());
+                }
+            } else {
+                failedTraces++;
+            }
+        }
+
+        if (Double.isFinite(result)) {
+            if (boundaryConsumer != null) {
+                recorder.replay(boundaryConsumer);
+            } else {
+                recorder.replaySegments(collector.firstMaterial(), segmentConsumer);
+            }
         }
 
         return result;
@@ -180,6 +276,115 @@ final class FrequencyMaterialPathCache {
         return repeated;
     }
 
+    private static void replaySegments(ResourceLocation initialMaterial, ResourceLocation[] materials, double[] fractions, byte[] axes, int count, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        if (initialMaterial == null) {
+            return;
+        }
+
+        ResourceLocation current = initialMaterial;
+        double start = 0.0;
+        int enteredAxes = 0;
+
+        for (int i = 0; i < count; i++) {
+            double end = fractions[i];
+
+            if (end > start) {
+                consumer.accept(current, start, end, enteredAxes);
+            }
+
+            start = end;
+            current = materials[i];
+            enteredAxes = Byte.toUnsignedInt(axes[i]);
+        }
+
+        if (start < 1.0) {
+            consumer.accept(current, start, 1.0, enteredAxes);
+        }
+    }
+
+    private static final class BoundaryRecorder implements MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> {
+        private ResourceLocation first;
+        private ResourceLocation[] materials = new ResourceLocation[8];
+        private double[] fractions = new double[8];
+        private byte[] axes = new byte[8];
+        private int count;
+
+        @Override
+        public void onBoundary(ResourceLocation from, ResourceLocation to, double fraction, int crossedAxes) {
+            if (count == 0) {
+                first = from;
+            }
+
+            if (count == materials.length) {
+                int capacity = materials.length << 1;
+                materials = Arrays.copyOf(materials, capacity);
+                fractions = Arrays.copyOf(fractions, capacity);
+                axes = Arrays.copyOf(axes, capacity);
+            }
+
+            materials[count] = to;
+            fractions[count] = fraction;
+            axes[count] = (byte) crossedAxes;
+            count++;
+        }
+
+        int count() {
+            return count;
+        }
+
+        BoundaryGeometry snapshot(ResourceLocation initialMaterial) {
+            if (initialMaterial == null) {
+                return null;
+            }
+
+            return new BoundaryGeometry(initialMaterial, Arrays.copyOf(materials, count), Arrays.copyOf(fractions, count), Arrays.copyOf(axes, count));
+        }
+
+        void replay(MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
+            ResourceLocation from = first;
+
+            for (int i = 0; i < count; i++) {
+                ResourceLocation to = materials[i];
+                consumer.onBoundary(from, to, fractions[i], axes[i]);
+                from = to;
+            }
+        }
+
+        void replaySegments(ResourceLocation initialMaterial, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+            FrequencyMaterialPathCache.replaySegments(initialMaterial, materials, fractions, axes, count, consumer);
+        }
+    }
+
+    private static final class BoundaryGeometry {
+        private static final BoundaryGeometry EMPTY = new BoundaryGeometry(null, new ResourceLocation[0], new double[0], new byte[0]);
+
+        private final ResourceLocation first;
+        private final ResourceLocation[] materials;
+        private final double[] fractions;
+        private final byte[] axes;
+
+        private BoundaryGeometry(ResourceLocation first, ResourceLocation[] materials, double[] fractions, byte[] axes) {
+            this.first = first;
+            this.materials = materials;
+            this.fractions = fractions;
+            this.axes = axes;
+        }
+
+        void replay(MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
+            ResourceLocation from = first;
+
+            for (int i = 0; i < materials.length; i++) {
+                ResourceLocation to = materials[i];
+                consumer.onBoundary(from, to, fractions[i], axes[i]);
+                from = to;
+            }
+        }
+
+        void replaySegments(FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+            FrequencyMaterialPathCache.replaySegments(first, materials, fractions, axes, materials.length, consumer);
+        }
+    }
+
     private static final class Entry {
         final Vec3 start;
         final Vec3 end;
@@ -187,6 +392,7 @@ final class FrequencyMaterialPathCache {
         double factor;
         long rulesRevision;
         Trace trace;
+        BoundaryGeometry boundaryGeometry;
 
         Entry previous;
         Entry next;

@@ -2,9 +2,8 @@ package com.krimzik.spectra.api;
 
 import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.TRx.FrequencyReceiver;
-import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
-import com.krimzik.spectra.api.material.FrequencySableMaterialAttenuation;
-import com.krimzik.spectra.api.material.MinecraftMaterialPropagation;
+import com.krimzik.spectra.api.material.*;
+import com.krimzik.spectra.propagation.WaveMedium;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.logging.LogUtils;
 import com.sun.management.ThreadMXBean;
@@ -285,6 +284,28 @@ public final class SpectraProfileCommand {
             measure(count, "SABLE_SINGLE_CANDIDATE", sableSingleCandidate, memory);
             measure(count, "SABLE_EMPTY_CANDIDATES", sableEmptyCandidates, memory);
             measure(count, "WORLD_MATERIAL_CACHED_NO_SHIPS", cachedWorldMaterials, memory);
+            MinecraftWaveMediumResolver waveResolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), java.util.Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0), FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 6.0, 0.0)), java.util.List.of());
+            Runnable freshWaveCache = () -> {
+                MinecraftWorldWavePath wave = new MinecraftWorldWavePath(new MinecraftMaterialPropagation(level), waveResolver);
+                for (Vec3 emitterWorld : paths) {
+                    sink[0] += wave.evaluate(emitterWorld, receiverWorld, FREQUENCY, true);
+                }
+            };
+
+            MinecraftWorldWavePath cachedWave = new MinecraftWorldWavePath(batchedPropagation, waveResolver);
+            for (Vec3 emitterWorld : paths) {
+                sink[0] += cachedWave.evaluate(emitterWorld, receiverWorld, FREQUENCY, true);
+            }
+
+            Runnable cachedWavePaths = () -> {
+                for (Vec3 emitterWorld : paths) {
+                    sink[0] += cachedWave.evaluate(emitterWorld, receiverWorld, FREQUENCY, true);
+                }
+            };
+
+            measure(count, "WORLD_WAVE_FRESH_CACHE", freshWaveCache, memory);
+            measure(count, "WORLD_WAVE_CACHED", cachedWavePaths, memory);
+            LOGGER.info("[SPECTRA-PROFILE] WAVE_WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             org.slf4j.LoggerFactory.getLogger(SpectraProfileCommand.class).info("[SPECTRA-PROFILE] WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);
             FrequencyMaterialAttenuation.setEnabled(false);

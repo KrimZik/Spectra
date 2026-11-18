@@ -14,6 +14,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -133,5 +134,65 @@ class FrequencySableMaterialAttenuationTest {
         assertEquals(original, factor(), 1.0e-12);
 
         assertEquals(1.0, FrequencySableMaterialAttenuation.factorForSublevels(level, START, END, List.of()), 1.0e-12);
+    }
+
+    @Test
+    void shipSegmentsUseOriginalWorldPathFractions() {
+        List<double[]> metalSegments = new ArrayList<>();
+
+        double result = FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(
+                level,
+                new Vec3(-0.5, 64.5, 0.5),
+                new Vec3(3.5, 64.5, 0.5),
+                List.of(sublevel),
+                (ship, materialId, from, to, axes) -> {
+                    assertSame(sublevel, ship);
+
+                    if (FrequencyMaterialClassifier.METAL.equals(materialId)) {
+                        metalSegments.add(new double[]{from, to});
+                    }
+                }
+        );
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), result, 1.0e-12);
+        assertEquals(1, metalSegments.size());
+        assertEquals(0.375, metalSegments.get(0)[0], 1.0e-12);
+        assertEquals(0.625, metalSegments.get(0)[1], 1.0e-12);
+    }
+
+    @Test
+    void shipBoundarySamplingStillWorksWhenAttenuationIsDisabled() {
+        FrequencyMaterialAttenuation.setEnabled(false);
+
+        List<double[]> metalSegments = new ArrayList<>();
+
+        double result = FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(
+                level,
+                START,
+                END,
+                List.of(sublevel),
+                (ship, materialId, from, to, axes) -> {
+                    if (FrequencyMaterialClassifier.METAL.equals(materialId)) {
+                        metalSegments.add(new double[]{from, to});
+                    }
+                }
+        );
+
+        assertEquals(1.0, result, 0.0);
+        assertEquals(1, metalSegments.size());
+        assertEquals(0.25, metalSegments.get(0)[0], 1.0e-12);
+        assertEquals(0.75, metalSegments.get(0)[1], 1.0e-12);
+    }
+
+    @Test
+    void movingShipRemovesBoundarySegmentsFromOldPosition() {
+        pose.position().set(0.0, 0.0, 8.0);
+        bounds.set(0, 64, 8, 3, 65, 9);
+
+        List<String> materials = new ArrayList<>();
+        double result = FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(level, START, END, List.of(sublevel), (ship, materialId, from, to, axes) -> materials.add(materialId.toString()));
+
+        assertEquals(1.0, result, 0.0);
+        assertTrue(materials.isEmpty());
     }
 }

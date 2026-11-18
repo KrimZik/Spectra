@@ -1,5 +1,6 @@
 package com.krimzik.spectra.api.material;
 
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -88,5 +89,38 @@ class FrequencyMaterialSectionCacheTest {
         assertNotNull(updated);
         assertTrue(updated.current());
         assertEquals(0.25, updated.sectionLoss(), 0.0);
+    }
+
+    @Test
+    void equalAttenuationDoesNotHideDifferentMaterials() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:glass"), 3.0)));
+        LevelChunkSection section = section(Blocks.STONE.defaultBlockState(), Blocks.GLASS.defaultBlockState());
+
+        when(section.getBlockState(anyInt(), anyInt(), anyInt()))
+                .thenAnswer(call -> {
+                    int x = call.getArgument(0);
+                    return x == 1 ? Blocks.GLASS.defaultBlockState() : Blocks.STONE.defaultBlockState();
+                });
+
+        FrequencyMaterialSectionCache cache = FrequencyMaterialSectionCache.create(section);
+
+        assertNotNull(cache);
+        assertEquals(3.0, cache.sectionLoss(), 0.0);
+        assertNull(cache.sectionMaterial());
+        assertNull(cache.regionMaterial(0, 0, 0));
+        assertEquals(FrequencyMaterialClassifier.STONE, cache.regionMaterial(5, 0, 0));
+    }
+
+    @Test
+    void uniformMaterialSectionAvoidsRegionBlockReads() {
+        LevelChunkSection section = section(Blocks.STONE.defaultBlockState(), Blocks.DEEPSLATE.defaultBlockState());
+
+        FrequencyMaterialSectionCache cache = FrequencyMaterialSectionCache.create(section);
+
+        assertNotNull(cache);
+        assertEquals(FrequencyMaterialClassifier.STONE, cache.sectionMaterial());
+        assertEquals(FrequencyMaterialClassifier.STONE, cache.regionMaterial(3, 5, 7));
+
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
     }
 }

@@ -1,7 +1,9 @@
 package com.krimzik.spectra.api.material;
 
 import com.krimzik.spectra.math.MaterialAttenuationMath;
+import com.krimzik.spectra.propagation.geometry.MaterialBoundaryScanner;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
@@ -47,6 +49,11 @@ public final class FrequencyMaterialAttenuation {
 
     private FrequencyMaterialAttenuation() {}
 
+    @FunctionalInterface
+    public interface MaterialSegmentConsumer {
+        void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes);
+    }
+
     private static double boundaryTime(double offset, double direction, double inverseDirection) {
         return Double.isFinite(inverseDirection) ? offset * inverseDirection : offset / direction;
     }
@@ -74,8 +81,29 @@ public final class FrequencyMaterialAttenuation {
         return factor(level, startX, startY, startZ, endX, endY, endZ, true);
     }
 
+    static double factorRelativeToAirWithMaterials(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(consumer);
+        return factor(level, startX, startY, startZ, endX, endY, endZ, true, null, consumer);
+    }
+
     static double factorWithTrace(ServerLevel level, Vec3 start, Vec3 end, FrequencyMaterialPathCache.Trace trace) {
         return factor(level, start.x, start.y, start.z, end.x, end.y, end.z, false, trace);
+    }
+
+    public static double factorWithMaterials(ServerLevel level, Vec3 start, Vec3 end, MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(consumer);
+
+        return factor(level, start.x, start.y, start.z, end.x, end.y, end.z, false, null, consumer);
+    }
+
+    static double factorWithTraceAndMaterials(ServerLevel level, Vec3 start, Vec3 end, FrequencyMaterialPathCache.Trace trace, MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(consumer);
+
+        return factor(level, start.x, start.y, start.z, end.x, end.y, end.z, false, trace, consumer);
     }
 
     private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir) {
@@ -83,6 +111,10 @@ public final class FrequencyMaterialAttenuation {
     }
 
     private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir, FrequencyMaterialPathCache.Trace trace) {
+        return factor(level, startX, startY, startZ, endX, endY, endZ, relativeToAir, trace, null);
+    }
+
+    private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir, FrequencyMaterialPathCache.Trace trace, MaterialSegmentConsumer consumer) {
         Objects.requireNonNull(level);
 
         TraversalStats stats = ACTIVE_STATS.get();
@@ -90,7 +122,7 @@ public final class FrequencyMaterialAttenuation {
             stats.paths++;
         }
 
-        if (!enabled) {
+        if (!enabled && consumer == null) {
             return 1.0;
         }
 
@@ -131,6 +163,7 @@ public final class FrequencyMaterialAttenuation {
 
         double t = 0.0;
         double loss = 0.0;
+        int enteredAxes = 0;
         double airBaseline = relativeToAir ? FrequencyMaterialRules.decibelsPerMeter(Blocks.AIR.defaultBlockState()) : 0.0;
 
         int minY = level.getMinBuildHeight();
@@ -161,6 +194,10 @@ public final class FrequencyMaterialAttenuation {
 
                 if (trace != null) {
                     trace.missing();
+                }
+
+                if (consumer != null) {
+                    return Double.NaN;
                 }
 
                 double tx = sx > 0 ? boundaryTime(((long) chunkX + 1L) * 16.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime((long) chunkX * 16.0 - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
@@ -235,7 +272,21 @@ public final class FrequencyMaterialAttenuation {
                     }
                 }
 
-                if (regionLoss >= 0.0) {
+                ResourceLocation regionMaterial = null;
+                if (consumer != null && regionLoss >= 0.0) {
+                    if (emptySection) {
+                        regionMaterial = FrequencyMaterialClassifier.AIR;
+                    } else if (materialCache != null) {
+                        regionMaterial = materialCache.sectionMaterial();
+
+                        if (regionMaterial == null) {
+                            shift = 2;
+                            regionMaterial = materialCache.regionMaterial(x & 15, y & 15, z & 15);
+                        }
+                    }
+                }
+
+                if (regionLoss >= 0.0 && (consumer == null || regionMaterial != null)) {
                     int regionX = x >> shift;
                     int regionY = y >> shift;
                     int regionZ = z >> shift;
@@ -255,6 +306,10 @@ public final class FrequencyMaterialAttenuation {
                         }
 
                         loss = MaterialAttenuationMath.accumulateLoss(loss, regionLoss - airBaseline, distance * (exit - t));
+
+                        if (consumer != null) {
+                            consumer.accept(regionMaterial, t, exit, enteredAxes);
+                        }
 
                         if (exit >= 1.0) {
                             break;
@@ -287,6 +342,8 @@ public final class FrequencyMaterialAttenuation {
                             }
                         }
 
+                        enteredAxes = (exitX <= exit ? MaterialBoundaryScanner.X_AXIS : 0) | (exitY <= exit ? MaterialBoundaryScanner.Y_AXIS : 0) | (exitZ <= exit ? MaterialBoundaryScanner.Z_AXIS : 0);
+
                         t = exit;
                         continue;
                     }
@@ -306,6 +363,10 @@ public final class FrequencyMaterialAttenuation {
                 double length = distance * (next - t);
                 if (emptySection) {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
+
+                    if (consumer != null) {
+                        consumer.accept(FrequencyMaterialClassifier.AIR, t, next, enteredAxes);
+                    }
                 } else {
                     BlockState state;
 
@@ -326,7 +387,15 @@ public final class FrequencyMaterialAttenuation {
 
                     double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(state);
                     loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
+
+                    if (consumer != null) {
+                        consumer.accept(FrequencyMaterialClassifier.classify(state), t, next, enteredAxes);
+                    }
                 }
+            }
+
+            if (consumer != null && next > t && (y < minY || y >= maxY)) {
+                consumer.accept(FrequencyMaterialClassifier.AIR, t, next, enteredAxes);
             }
 
             t = next;
@@ -334,17 +403,25 @@ public final class FrequencyMaterialAttenuation {
                 break;
             }
 
+            enteredAxes = 0;
             if (tx <= next) {
                 x += sx;
+                enteredAxes |= MaterialBoundaryScanner.X_AXIS;
             }
 
             if (ty <= next) {
                 y += sy;
+                enteredAxes |= MaterialBoundaryScanner.Y_AXIS;
             }
 
             if (tz <= next) {
                 z += sz;
+                enteredAxes |= MaterialBoundaryScanner.Z_AXIS;
             }
+        }
+
+        if (!enabled) {
+            return 1.0;
         }
 
         return relativeToAir ? FrequencyMaterialRules.relativeAmplitudeFactor(loss) : FrequencyMaterialRules.amplitudeFactor(loss);
