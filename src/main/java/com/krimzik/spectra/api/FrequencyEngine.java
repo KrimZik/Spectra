@@ -62,7 +62,6 @@ public final class FrequencyEngine {
 
     private static final class EmitterMotionSample {
         final FrequencyAccelerationTracker tracker = new FrequencyAccelerationTracker();
-
         long tick = Long.MIN_VALUE;
         FrequencyMotionSnapshot motion;
         FrequencyAccelerationTracker.Acceleration acceleration;
@@ -99,6 +98,10 @@ public final class FrequencyEngine {
 
         MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0), FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 6.0, 0.0)), List.of());
         this.receptionWave = new MinecraftCombinedWavePath(pathAttenuation, resolver);
+    }
+
+    MinecraftMaterialPropagation.WorldCacheStats materialCacheStats() {
+        return pathAttenuation.worldCacheStats();
     }
 
     private final class EmitterRegistration implements FrequencyRegistration {

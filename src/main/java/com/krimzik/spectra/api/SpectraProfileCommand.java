@@ -401,17 +401,11 @@ public final class SpectraProfileCommand {
             Vec3 origin = source.getPosition();
             FrequencySignal signal = new FrequencySignal(FREQUENCY, 1.0, 0.0, 343.0);
 
+            Vec3[] emitterPositions = new Vec3[emitterCount];
             for (int i = 0; i < emitterCount; i++) {
-                Vec3 position = origin.add(
-                        i % 21 - 10,
-                        (i / 441) % 21 - 10,
-                        (i / 21) % 21 - 10
-                );
-
-                engine.registerChunkBound(
-                        net.minecraft.core.BlockPos.containing(position),
-                        new Emitter(position, signal)
-                );
+                Vec3 position = origin.add(i % 21 - 10, (i / 441) % 21 - 10, (i / 21) % 21 - 10);
+                engine.registerChunkBound(net.minecraft.core.BlockPos.containing(position), new Emitter(position, signal));
+                emitterPositions[i] = position;
             }
 
             int samples = receiverCount > 32 ? 3 : 5;
@@ -446,6 +440,77 @@ public final class SpectraProfileCommand {
             measureReceiverSweeps("MULTI_RECEIVER_STATIC", engine, stationaryFrames, null, reception, memory);
             measureReceiverSweeps("MULTI_RECEIVER_MOVING", engine, movingFrames, null, reception, memory);
 
+            int diagnosticReceivers = Math.min(receiverCount, 128);
+            FrequencyMaterialAttenuation.MaterialSegmentConsumer discard = (material, from, to, axes) -> {};
+            MinecraftCombinedWavePath diagnosticWave = new MinecraftCombinedWavePath(new MinecraftMaterialPropagation(level), new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), java.util.Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0), FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 6.0, 0.0)), java.util.List.of()));
+
+            Runnable rawWorld = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    Vec3 end = stationary[i].position();
+
+                    for (Vec3 start : emitterPositions) {
+                        double result = FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, discard);
+                        if (Double.isFinite(result)) {
+                            sink[0] += result;
+                        }
+                    }
+                }
+            };
+
+            Runnable rawFactorOnly = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    Vec3 end = stationary[i].position();
+
+                    for (Vec3 start : emitterPositions) {
+                        double result = FrequencyMaterialAttenuation.factor(level, start, end);
+                        if (Double.isFinite(result)) {
+                            sink[0] += result;
+                        }
+                    }
+                }
+            };
+
+            var chunkSource = level.getChunkSource();
+
+            Runnable chunkLookupOnly = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    for (Vec3 start : emitterPositions) {
+                        int chunkX = ((int) Math.floor(start.x)) >> 4;
+                        int chunkZ = ((int) Math.floor(start.z)) >> 4;
+
+                        var chunk = chunkSource.getChunkNow(chunkX, chunkZ);
+                        if (chunk != null) {
+                            sink[0] += chunk.getPos().x;
+                        }
+                    }
+                }
+            };
+
+            Runnable cachedWorld = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    Vec3 end = stationary[i].position();
+
+                    for (Vec3 start : emitterPositions) {
+                        double result = diagnosticWave.evaluate(start, end, java.util.List.of(), FREQUENCY, true);
+                        if (Double.isFinite(result)) {
+                            sink[0] += result;
+                        }
+                    }
+                }
+            };
+
+            Runnable fullReception = () -> {
+                for (int i = 0; i < diagnosticReceivers; i++) {
+                    engine.forEachReceivedInRange(stationary[i], RANGE, reception);
+                }
+            };
+
+            measurePathDiagnostic("RAW_WORLD_PATH", rawWorld, diagnosticReceivers, emitterCount, memory);
+            measurePathDiagnostic("CHUNK_LOOKUP_ONLY", chunkLookupOnly, diagnosticReceivers, emitterCount, memory);
+            measurePathDiagnostic("RAW_FACTOR_ONLY", rawFactorOnly, diagnosticReceivers, emitterCount, memory);
+            measurePathDiagnostic("CACHED_WORLD_WAVE", cachedWorld, diagnosticReceivers, emitterCount, memory);
+            measurePathDiagnostic("FULL_RECEPTION_SAMPLE", fullReception, diagnosticReceivers, emitterCount, memory);
+
             checksum = sink[0];
             source.sendSuccess(() -> Component.literal("Multi-receiver profiling complete. Results in latest.log."), false);
 
@@ -459,6 +524,7 @@ public final class SpectraProfileCommand {
         double[] times = new double[frames.length];
         double[] allocations = new double[frames.length];
         long threadId = Thread.currentThread().threadId();
+        var cacheBefore = engine.materialCacheStats();
 
         for (int sample = 0; sample < frames.length; sample++) {
             long beforeBytes = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
@@ -480,6 +546,31 @@ public final class SpectraProfileCommand {
         Arrays.sort(allocations);
 
         LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] stage=%s receivers=%d median=%.3f ms/sweep allocated=%.1f B/sweep", stage, frames[0].length, times[times.length / 2], allocations[allocations.length / 2]));
+        var cacheAfter = engine.materialCacheStats();
+        LOGGER.info("[SPECTRA-PROFILE] stage={} cacheHits={} coldMisses={} traceBuilds={} evictions={} entries={}", stage, cacheAfter.cacheHits() - cacheBefore.cacheHits(), cacheAfter.coldMisses() - cacheBefore.coldMisses(), cacheAfter.traceBuilds() - cacheBefore.traceBuilds(), cacheAfter.evictions() - cacheBefore.evictions(), cacheAfter.entries());
+    }
+
+    private static void measurePathDiagnostic(String stage, Runnable task, int receivers, int emitters, ThreadMXBean memory) {
+        double[] times = new double[3];
+        double[] allocations = new double[3];
+        long threadId = Thread.currentThread().threadId();
+
+        task.run();
+
+        for (int i = 0; i < times.length; i++) {
+            long before = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+            long start = System.nanoTime();
+
+            task.run();
+
+            times[i] = (System.nanoTime() - start) / 1_000_000.0;
+            allocations[i] = memory == null ? -1.0 : memory.getThreadAllocatedBytes(threadId) - before;
+        }
+
+        Arrays.sort(times);
+        Arrays.sort(allocations);
+
+        LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] stage=%s paths=%d median=%.3f ms allocated=%.1f B", stage, (long) receivers * emitters, times[1], allocations[1]));
     }
 
     private static ThreadMXBean memoryBean() {

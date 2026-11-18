@@ -18,6 +18,7 @@ public final class FrequencyMaterialAttenuation {
     private static volatile boolean enabled;
 
     private static final ThreadLocal<TraversalStats> ACTIVE_STATS = new ThreadLocal<>();
+    private static final ThreadLocal<BlockPos.MutableBlockPos> BLOCK_LOOKUP_POS = ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
 
     public static final class TraversalStats {
         long paths;
@@ -382,7 +383,7 @@ public final class FrequencyMaterialAttenuation {
                         state = section.getBlockState(x & 15, y & 15, z & 15);
                     } else {
                         if (pos == null) {
-                            pos = new BlockPos.MutableBlockPos();
+                            pos = BLOCK_LOOKUP_POS.get();
                         }
 
                         pos.set(x, y, z);
