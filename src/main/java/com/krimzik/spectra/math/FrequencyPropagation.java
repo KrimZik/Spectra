@@ -25,6 +25,30 @@ public final class FrequencyPropagation {
         return distanceMeters / speedMetersPerSecond;
     }
 
+    public static double appendPathDistance(double accumulatedMeters, double segmentMeters) {
+        if (!Double.isFinite(accumulatedMeters) || accumulatedMeters < 0.0 || !Double.isFinite(segmentMeters) || segmentMeters < 0.0) {
+            throw new IllegalArgumentException("Invalid path distance");
+        }
+
+        return accumulatedMeters + segmentMeters;
+    }
+
+    public static double appendPathTravelTime(double accumulatedSeconds, double segmentMeters, double speedMetersPerSecond) {
+        if (!Double.isFinite(accumulatedSeconds) || accumulatedSeconds < 0.0) {
+            throw new IllegalArgumentException("Invalid accumulated travel time");
+        }
+
+        return accumulatedSeconds + travelTimeSeconds(segmentMeters, speedMetersPerSecond);
+    }
+
+    public static double amplitudeThroughPath(double sourceAmplitude, double pathMeters, double transmissionFactor) {
+        if (!Double.isFinite(transmissionFactor) || transmissionFactor < 0.0) {
+            throw new IllegalArgumentException("Invalid path transmission");
+        }
+
+        return amplitudeAtDistance(sourceAmplitude, pathMeters) * transmissionFactor;
+    }
+
     public static double sampleReceivedAtTick(double frequencyHz, double receivedAmplitude, double initialPhaseRadians, long tick, double travelTimeSeconds) {
         return FrequencyMath.sampleSineAtTick(frequencyHz, receivedAmplitude, initialPhaseRadians, tick, travelTimeSeconds);
     }

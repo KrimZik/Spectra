@@ -124,4 +124,38 @@ public class FrequencySimulationTest {
 
         assertEquals(-1.0, sample, 1.0e-12);
     }
+
+    @Test
+    void segmentedPathAccumulatesDistanceAndTravelTime() {
+        double distance = 0.0;
+        double travelTime = 0.0;
+
+        distance = FrequencyPropagation.appendPathDistance(distance, 3.0);
+        travelTime = FrequencyPropagation.appendPathTravelTime(travelTime, 3.0, 343.0);
+
+        distance = FrequencyPropagation.appendPathDistance(distance, 7.0);
+        travelTime = FrequencyPropagation.appendPathTravelTime(travelTime, 7.0, 1500.0);
+
+        assertEquals(10.0, distance, 1.0e-12);
+        assertEquals(3.0 / 343.0 + 7.0 / 1500.0, travelTime, 1.0e-12);
+    }
+
+    @Test
+    void pathTransmissionAppliesSpreadingOnce() {
+        double transmission = MaterialAttenuationMath.amplitudeFactor(5.0);
+
+        double expected = FrequencyPropagation.amplitudeAtDistance(8.0, 10.0) * transmission;
+        double actual = FrequencyPropagation.amplitudeThroughPath(8.0, 10.0, transmission);
+
+        assertEquals(expected, actual, 1.0e-12);
+    }
+
+    @Test
+    void directPathRemainsEquivalentToExistingPropagation() {
+        double amplitude = 4.0;
+        double distance = 25.0;
+
+        assertEquals(FrequencyPropagation.amplitudeAtDistance(amplitude, distance), FrequencyPropagation.amplitudeThroughPath(amplitude, distance, 1.0), 1.0e-12);
+        assertEquals(FrequencyPropagation.travelTimeSeconds(distance, 343.0), FrequencyPropagation.appendPathTravelTime(0.0, distance, 343.0), 1.0e-12);
+    }
 }
