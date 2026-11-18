@@ -29,10 +29,17 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
     private final WaveMedium fallback;
     private final Map<ResourceLocation, WaveMedium> blocks;
     private final List<Rule> tags;
-    private final ConcurrentHashMap<BlockState, WaveMedium> cache = new ConcurrentHashMap<>();
+    private final Map<ResourceLocation, WaveMedium> materials;
+    private volatile ConcurrentHashMap<BlockState, WaveMedium> cache = new ConcurrentHashMap<>();
+    private volatile long cacheRevision = FrequencyMaterialRules.revision();
 
     public MinecraftWaveMediumResolver(WaveMedium fallback, List<Rule> rules) {
+        this(fallback, Map.of(), rules);
+    }
+
+    public MinecraftWaveMediumResolver(WaveMedium fallback, Map<ResourceLocation, WaveMedium> materials, List<Rule> rules) {
         this.fallback = Objects.requireNonNull(fallback);
+        this.materials = Map.copyOf(Objects.requireNonNull(materials));
         Objects.requireNonNull(rules);
 
         Map<ResourceLocation, WaveMedium> blocks = new HashMap<>();
@@ -51,7 +58,6 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
         this.blocks = Map.copyOf(blocks);
         this.tags = List.copyOf(tags);
     }
-
     public static Rule block(ResourceLocation id, WaveMedium medium) {
         return new Rule(Objects.requireNonNull(id), null, medium);
     }
@@ -68,13 +74,20 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
             throw new IllegalArgumentException("Invalid frequency");
         }
 
+        long revision = FrequencyMaterialRules.revision();
+        if (cacheRevision != revision) {
+            cache = new ConcurrentHashMap<>();
+            cacheRevision = revision;
+        }
+
         return cache.computeIfAbsent(state, this::resolveUncached);
     }
 
     private WaveMedium resolveUncached(BlockState state) {
-        WaveMedium medium = blocks.get(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
-        if (medium != null) {
-            return medium;
+        WaveMedium direct = blocks.get(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
+
+        if (direct != null) {
+            return direct;
         }
 
         for (Rule rule : tags) {
@@ -83,6 +96,19 @@ public final class MinecraftWaveMediumResolver implements WaveMediumResolver<Blo
             }
         }
 
-        return fallback;
+        ResourceLocation material = FrequencyMaterialClassifier.classify(state);
+        WaveMedium base = materials.getOrDefault(material, fallback);
+        FrequencyMaterialRules.Properties properties = FrequencyMaterialRules.properties(material);
+        Double overrideLoss = FrequencyMaterialRules.overrideLoss(state);
+
+        if (properties == null && overrideLoss == null) {
+            return base;
+        }
+
+        double speed = properties != null && properties.speedMetersPerSecond() != null ? properties.speedMetersPerSecond() : base.speedMetersPerSecond();
+        double impedance = properties != null && properties.impedance() != null ? properties.impedance() : base.impedance();
+        double loss = overrideLoss != null ? overrideLoss : properties != null && properties.decibelsPerMeter() != null ? properties.decibelsPerMeter() : base.lossDbPerMeter();
+
+        return new WaveMedium(speed, impedance, loss);
     }
 }

@@ -59,4 +59,30 @@ class WaveBoundaryMathTest {
         assertThrows(IllegalArgumentException.class, () -> WaveBoundaryMath.reflectance(Double.NaN, 1.0));
         assertThrows(IllegalArgumentException.class, () -> WaveBoundaryMath.transmittance(Double.POSITIVE_INFINITY, 1.0));
     }
+
+    @Test
+    void signedReflectionCoefficientPreservesPhaseReversal() {
+        assertEquals(0.5, WaveBoundaryMath.reflectionCoefficient(1.0, 3.0), EPSILON);
+        assertEquals(-0.5, WaveBoundaryMath.reflectionCoefficient(3.0, 1.0), EPSILON);
+        assertEquals(0.0, WaveBoundaryMath.reflectionCoefficient(3.0, 3.0), EPSILON);
+    }
+
+    @Test
+    void normalizedTransmissionAmplitudeMatchesEnergy() {
+        double amplitude = WaveBoundaryMath.transmissionAmplitudeFactor(1.0, 3.0);
+
+        assertEquals(0.75, amplitude * amplitude, EPSILON);
+        assertEquals(1.0, WaveBoundaryMath.transmissionAmplitudeFactor(3.0, 3.0), EPSILON);
+    }
+
+    @Test
+    void extremeImpedancesProduceFiniteAmplitudeCoefficients() {
+        double reflected = WaveBoundaryMath.reflectionCoefficient(1.0e-300, 1.0e300);
+        double transmitted = WaveBoundaryMath.transmissionAmplitudeFactor(1.0e-300, 1.0e300);
+
+        assertTrue(Double.isFinite(reflected));
+        assertTrue(Double.isFinite(transmitted));
+        assertEquals(1.0, reflected, EPSILON);
+        assertTrue(transmitted >= 0.0);
+    }
 }

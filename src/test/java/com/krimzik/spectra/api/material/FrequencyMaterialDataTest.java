@@ -1,5 +1,6 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.propagation.WaveMedium;
 import com.google.gson.JsonParser;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -8,6 +9,7 @@ import net.minecraft.world.level.block.Blocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -103,5 +105,160 @@ class FrequencyMaterialDataTest {
         );
 
         assertEquals(9.0, FrequencyMaterialRules.decibelsPerMeter(Blocks.STONE.defaultBlockState()), 0.0);
+    }
+
+    @Test
+    void customMaterialPropertiesAreSharedAcrossBlocks() {
+        listener.apply(
+                Map.of(
+                        ResourceLocation.parse("spectra:rubber_definition"),
+                        JsonParser.parseString("""
+                            {
+                              "material": "mymod:rubber",
+                              "db_loss": 2.5,
+                              "speed_mps": 1200.0,
+                              "impedance": 2.0
+                            }
+                            """),
+                        ResourceLocation.parse("spectra:rubber_stone"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:stone",
+                              "material": "mymod:rubber"
+                            }
+                            """),
+                        ResourceLocation.parse("spectra:rubber_glass"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:glass",
+                              "material": "mymod:rubber"
+                            }
+                            """)
+                ),
+                resources,
+                profiler
+        );
+
+        ResourceLocation rubber = ResourceLocation.parse("mymod:rubber");
+
+        assertEquals(rubber, FrequencyMaterialClassifier.classify(Blocks.STONE.defaultBlockState()));
+        assertEquals(rubber, FrequencyMaterialClassifier.classify(Blocks.GLASS.defaultBlockState()));
+
+        assertEquals(2.5, FrequencyMaterialRules.decibelsPerMeter(Blocks.STONE.defaultBlockState()));
+        assertEquals(2.5, FrequencyMaterialRules.decibelsPerMeter(Blocks.GLASS.defaultBlockState()));
+
+        var resolver = new MinecraftWaveMediumResolver(
+                new WaveMedium(300.0, 1.0, 0.5),
+                List.of()
+        );
+
+        WaveMedium medium = resolver.resolve(Blocks.STONE.defaultBlockState(), 100.0);
+
+        assertEquals(1200.0, medium.speedMetersPerSecond());
+        assertEquals(2.0, medium.impedance());
+        assertEquals(2.5, medium.lossDbPerMeter());
+    }
+
+    @Test
+    void missingMaterialPropertiesUseDefaults() {
+        listener.apply(
+                Map.of(
+                        ResourceLocation.parse("spectra:unknown_material"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:glass",
+                              "material": "mymod:unknown"
+                            }
+                            """)
+                ),
+                resources,
+                profiler
+        );
+
+        assertEquals(
+                ResourceLocation.parse("mymod:unknown"),
+                FrequencyMaterialClassifier.classify(Blocks.GLASS.defaultBlockState())
+        );
+
+        assertEquals(0.5, FrequencyMaterialRules.decibelsPerMeter(Blocks.GLASS.defaultBlockState()));
+
+        WaveMedium fallback = new WaveMedium(300.0, 1.0, 0.75);
+        var resolver = new MinecraftWaveMediumResolver(fallback, List.of());
+
+        assertSame(fallback, resolver.resolve(Blocks.GLASS.defaultBlockState(), 100.0));
+    }
+
+    @Test
+    void explicitAttenuationOverridesCustomMaterialDefault() {
+        listener.apply(
+                Map.of(
+                        ResourceLocation.parse("spectra:rubber"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:stone",
+                              "material": "mymod:rubber",
+                              "db_loss": 2.5
+                            }
+                            """),
+                        ResourceLocation.parse("spectra:stone_override"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:stone",
+                              "db_loss": 9.0
+                            }
+                            """)
+                ),
+                resources,
+                profiler
+        );
+
+        assertEquals(
+                ResourceLocation.parse("mymod:rubber"),
+                FrequencyMaterialClassifier.classify(Blocks.STONE.defaultBlockState())
+        );
+
+        assertEquals(9.0, FrequencyMaterialRules.decibelsPerMeter(Blocks.STONE.defaultBlockState()));
+    }
+
+    @Test
+    void conflictingMaterialDefinitionsDoNotReplaceActiveRules() {
+        listener.apply(
+                Map.of(
+                        ResourceLocation.parse("spectra:valid"),
+                        JsonParser.parseString("""
+                            {
+                              "block": "minecraft:stone",
+                              "db_loss": 7.0
+                            }
+                            """)
+                ),
+                resources,
+                profiler
+        );
+
+        assertThrows(IllegalArgumentException.class, () ->
+                listener.apply(
+                        Map.of(
+                                ResourceLocation.parse("spectra:first"),
+                                JsonParser.parseString("""
+                                    {
+                                      "material": "mymod:rubber",
+                                      "db_loss": 2.5
+                                    }
+                                    """),
+                                ResourceLocation.parse("spectra:second"),
+                                JsonParser.parseString("""
+                                    {
+                                      "material": "mymod:rubber",
+                                      "db_loss": 4.0
+                                    }
+                                    """)
+                        ),
+                        resources,
+                        profiler
+                )
+        );
+
+        assertEquals(7.0, FrequencyMaterialRules.decibelsPerMeter(Blocks.STONE.defaultBlockState()));
     }
 }

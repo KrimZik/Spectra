@@ -73,4 +73,12 @@ class MinecraftWaveMediumResolverTest {
         assertThrows(IllegalArgumentException.class, () -> resolver.resolve(Blocks.STONE.defaultBlockState(), 0.0));
         assertThrows(IllegalArgumentException.class, () -> resolver.resolve(Blocks.STONE.defaultBlockState(), Double.NaN));
     }
+
+    @Test
+    void categoryMediaUsesSharedClassification() {
+        var resolver = new MinecraftWaveMediumResolver(DEFAULT, java.util.Map.of(FrequencyMaterialClassifier.STONE, STONE), List.of());
+
+        assertSame(STONE, resolver.resolve(Blocks.STONE.defaultBlockState(), 100.0));
+        assertSame(DEFAULT, resolver.resolve(Blocks.GLASS.defaultBlockState(), 100.0));
+    }
 }

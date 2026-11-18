@@ -4,23 +4,28 @@ import com.krimzik.spectra.math.MaterialAttenuationMath;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.tags.BlockTags;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class FrequencyMaterialRules {
-    public record Rule(ResourceLocation block, TagKey<Block> tag, double decibelsPerMeter) {
+    public record Rule(ResourceLocation block, TagKey<Block> tag, ResourceLocation material, Double decibelsPerMeter) {
         public Rule {
-            if ((block == null) == (tag == null) || !Double.isFinite(decibelsPerMeter) || decibelsPerMeter < 0.0) {
-                throw new IllegalArgumentException("Invalid material rule");
+            if ((block == null) == (tag == null)) {
+                throw new IllegalArgumentException("Expected one block or tag");
+            }
+
+            if (material == null && decibelsPerMeter == null) {
+                throw new IllegalArgumentException("Material rule has no properties");
+            }
+
+            if (decibelsPerMeter != null && (!Double.isFinite(decibelsPerMeter) || decibelsPerMeter < 0.0)) {
+                throw new IllegalArgumentException("Invalid attenuation");
             }
         }
 
@@ -29,7 +34,36 @@ public final class FrequencyMaterialRules {
         }
     }
 
+    public record Properties(Double decibelsPerMeter, Double speedMetersPerSecond, Double impedance) {
+        public Properties {
+            if (decibelsPerMeter != null && (!Double.isFinite(decibelsPerMeter) || decibelsPerMeter < 0.0)) {
+                throw new IllegalArgumentException("Invalid attenuation");
+            }
+
+            if (speedMetersPerSecond != null && (!Double.isFinite(speedMetersPerSecond) || speedMetersPerSecond <= 0.0)) {
+                throw new IllegalArgumentException("Invalid propagation speed");
+            }
+
+            if (impedance != null && (!Double.isFinite(impedance) || impedance <= 0.0)) {
+                throw new IllegalArgumentException("Invalid impedance");
+            }
+        }
+
+        public Properties merge(Properties other) {
+            return new Properties(combine(decibelsPerMeter, other.decibelsPerMeter), combine(speedMetersPerSecond, other.speedMetersPerSecond), combine(impedance, other.impedance));
+        }
+
+        private static Double combine(Double first, Double second) {
+            if (first != null && second != null && !first.equals(second)) {
+                throw new IllegalArgumentException("Conflicting material properties");
+            }
+
+            return first != null ? first : second;
+        }
+    }
+
     private static volatile List<Rule> overrides = List.of();
+    private static volatile Map<ResourceLocation, Properties> materials = Map.of();
     private static volatile ConcurrentHashMap<BlockState, Double> attenuationCache = new ConcurrentHashMap<>();
     private static volatile double airLossDbPerMeter;
     private static volatile double waterLossDbPerMeter = 0.5;
@@ -61,21 +95,69 @@ public final class FrequencyMaterialRules {
     }
 
     static boolean canSkipAirSections() {
-        return overrides.isEmpty();
+        Properties air = materials.get(FrequencyMaterialClassifier.AIR);
+        return overrides.isEmpty() && (air == null || air.decibelsPerMeter() == null);
     }
 
     public static Rule block(ResourceLocation id, double loss) {
-        return new Rule(Objects.requireNonNull(id), null, loss);
+        return new Rule(Objects.requireNonNull(id), null, null, loss);
     }
 
     public static Rule tag(ResourceLocation id, double loss) {
-        return new Rule(null, TagKey.create(Registries.BLOCK, Objects.requireNonNull(id)), loss);
+        return new Rule(null, TagKey.create(Registries.BLOCK, Objects.requireNonNull(id)), null, loss);
     }
 
     public static void replaceOverrides(List<Rule> rules) {
-        overrides = List.copyOf(Objects.requireNonNull(rules));
+        replaceMaterials(rules, Map.of());
+    }
+
+    public static void replaceMaterials(List<Rule> rules, Map<ResourceLocation, Properties> definitions) {
+        List<Rule> nextRules = List.copyOf(Objects.requireNonNull(rules));
+        Map<ResourceLocation, Properties> nextMaterials = Map.copyOf(Objects.requireNonNull(definitions));
+
+        overrides = nextRules;
+        materials = nextMaterials;
+        FrequencyMaterialClassifier.invalidate();
         attenuationCache = new ConcurrentHashMap<>();
         materialRevision++;
+    }
+
+    public static Properties properties(ResourceLocation material) {
+        return materials.get(material);
+    }
+
+    static ResourceLocation assignedMaterial(BlockState state) {
+        List<Rule> rules = overrides;
+        for (Rule rule : rules) {
+            if (rule.block() != null && rule.material() != null && rule.matches(state)) {
+                return rule.material();
+            }
+        }
+
+        for (Rule rule : rules) {
+            if (rule.tag() != null && rule.material() != null && rule.matches(state)) {
+                return rule.material();
+            }
+        }
+
+        return null;
+    }
+
+    static Double overrideLoss(BlockState state) {
+        List<Rule> rules = overrides;
+        for (Rule rule : rules) {
+            if (rule.block() != null && rule.decibelsPerMeter() != null && rule.matches(state)) {
+                return rule.decibelsPerMeter();
+            }
+        }
+
+        for (Rule rule : rules) {
+            if (rule.tag() != null && rule.decibelsPerMeter() != null && rule.matches(state)) {
+                return rule.decibelsPerMeter();
+            }
+        }
+
+        return null;
     }
 
     public static double decibelsPerMeter(BlockState state) {
@@ -84,32 +166,28 @@ public final class FrequencyMaterialRules {
     }
 
     private static double calculateLoss(BlockState state) {
-        List<Rule> rules = overrides;
+        Double override = overrideLoss(state);
 
-        for (Rule rule : rules) {
-            if (rule.block() != null && rule.matches(state)) {
-                return rule.decibelsPerMeter();
-            }
+        if (override != null) {
+            return override;
         }
 
-        for (Rule rule : rules) {
-            if (rule.tag() != null && rule.matches(state)) {
-                return rule.decibelsPerMeter();
-            }
+        ResourceLocation material = FrequencyMaterialClassifier.classify(state);
+        Properties properties = materials.get(material);
+
+        if (properties != null && properties.decibelsPerMeter() != null) {
+            return properties.decibelsPerMeter();
         }
 
-        if (state.isAir()) return airLossDbPerMeter;
-        if (state.getFluidState().is(FluidTags.WATER) && (state.getBlock() instanceof LiquidBlock || state.is(Blocks.BUBBLE_COLUMN))) {
-            return waterLossDbPerMeter;
-        }
-        if (state.is(BlockTags.WOOL)) return 4.0;
-        if (state.is(BlockTags.LEAVES)) return 0.2;
-        if (state.is(BlockTags.LOGS)) return 1.5;
-        if (state.is(BlockTags.PLANKS)) return 1.0;
-        if (state.is(BlockTags.STONE_BRICKS)) return 3.0;
-        if (state.is(Blocks.GLASS) || state.is(Blocks.GLASS_PANE)) return 0.4;
-        if (state.is(Blocks.STONE) || state.is(Blocks.DEEPSLATE)) return 3.0;
-        if (state.is(Blocks.IRON_BLOCK)) return 6.0;
+        if (material.equals(FrequencyMaterialClassifier.AIR)) return airLossDbPerMeter;
+        if (material.equals(FrequencyMaterialClassifier.WATER)) return waterLossDbPerMeter;
+        if (material.equals(FrequencyMaterialClassifier.WOOL)) return 4.0;
+        if (material.equals(FrequencyMaterialClassifier.FOLIAGE)) return 0.2;
+        if (material.equals(FrequencyMaterialClassifier.LOG)) return 1.5;
+        if (material.equals(FrequencyMaterialClassifier.WOOD)) return 1.0;
+        if (material.equals(FrequencyMaterialClassifier.GLASS)) return 0.4;
+        if (material.equals(FrequencyMaterialClassifier.STONE)) return 3.0;
+        if (material.equals(FrequencyMaterialClassifier.METAL)) return 6.0;
 
         return 0.5;
     }

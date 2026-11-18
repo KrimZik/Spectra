@@ -12,6 +12,14 @@ public final class FrequencyMaterialConfig {
     private static final ModConfigSpec.DoubleValue AIR_LOSS;
     private static final ModConfigSpec.DoubleValue WATER_LOSS;
 
+    private static final ModConfigSpec.BooleanValue REFLECTION;
+    private static final ModConfigSpec.BooleanValue REFRACTION;
+    private static final ModConfigSpec.BooleanValue DIFFRACTION;
+
+    private static volatile boolean reflectionEnabled;
+    private static volatile boolean refractionEnabled;
+    private static volatile boolean diffractionEnabled;
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -27,13 +35,38 @@ public final class FrequencyMaterialConfig {
         WATER_LOSS = builder
                 .comment("Attenuation through water, in dB per block.")
                 .defineInRange("waterLossDbPerMeter", 0.5, 0.0, 1000.0);
+        builder.pop();
 
+        builder.push("waves");
+        REFLECTION = builder
+                .comment("Enable wave reflection.")
+                .define("reflectionEnabled", true);
+
+        REFRACTION = builder
+                .comment("Enable wave refraction.")
+                .define("refractionEnabled", true);
+
+        DIFFRACTION = builder
+                .comment("Enable wave diffraction.")
+                .define("diffractionEnabled", true);
         builder.pop();
 
         SPEC = builder.build();
     }
 
     private FrequencyMaterialConfig() {}
+
+    public static boolean reflectionEnabled() {
+        return reflectionEnabled;
+    }
+
+    public static boolean refractionEnabled() {
+        return refractionEnabled;
+    }
+
+    public static boolean diffractionEnabled() {
+        return diffractionEnabled;
+    }
 
     public static void register(IEventBus bus, ModContainer container) {
         container.registerConfig(ModConfig.Type.SERVER, SPEC);
@@ -54,6 +87,9 @@ public final class FrequencyMaterialConfig {
         if (event.getConfig().getSpec() == SPEC) {
             FrequencyMaterialAttenuation.setEnabled(false);
             FrequencyMaterialRules.setEnvironmentLoss(0.0, 0.5);
+            reflectionEnabled = true;
+            refractionEnabled = true;
+            diffractionEnabled = true;
         }
     }
 
@@ -61,6 +97,10 @@ public final class FrequencyMaterialConfig {
         if (event.getConfig().getSpec() == SPEC) {
             FrequencyMaterialRules.setEnvironmentLoss(AIR_LOSS.get(), WATER_LOSS.get());
             FrequencyMaterialAttenuation.setEnabled(ENABLED.get());
+
+            reflectionEnabled = REFLECTION.get();
+            refractionEnabled = REFRACTION.get();
+            diffractionEnabled = DIFFRACTION.get();
         }
     }
 }
