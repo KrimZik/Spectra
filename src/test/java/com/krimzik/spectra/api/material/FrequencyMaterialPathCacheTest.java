@@ -468,4 +468,37 @@ class FrequencyMaterialPathCacheTest {
         assertEquals(List.of(0.0, 10.0, 0.0), losses);
         verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
     }
+
+    @Test
+    void productionReceptionUsesUnifiedTransmissionOnce() {
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, resolver);
+
+        double result = propagation.factorForDirectWaveReception(start, end, List.of(), 915_000_000.0, wave);
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0) * 0.75, result, 1.0e-12);
+        assertEquals(2, wave.boundaryCount());
+
+        clearInvocations(section);
+
+        double cached = propagation.factorForDirectWaveReception(start, end, List.of(), 915_000_000.0, wave);
+
+        assertEquals(result, cached, 0.0);
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void incompleteProductionReceptionFallsBackWithoutNaN() {
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), List.of()));
+        when(source.getChunkNow(anyInt(), anyInt())).thenReturn(null);
+
+        double result = propagation.factorForDirectWaveReception(start, end, List.of(), 915_000_000.0, wave);
+
+        assertTrue(Double.isFinite(result));
+        assertEquals(1.0, result, 0.0);
+        assertTrue(Double.isNaN(wave.attenuationFactor()));
+    }
 }

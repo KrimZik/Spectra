@@ -267,4 +267,28 @@ class FrequencySableMaterialAttenuationTest {
         assertEquals(1.0, wave.attenuationFactor(), 0.0);
         assertEquals(2, wave.boundaryCount());
     }
+
+    @Test
+    void productionWaveReceptionFollowsMovingShip() {
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, resolver);
+
+        pose.position().set(4.0, 0.0, 0.0);
+        bounds.set(4, 64, 0, 7, 65, 1);
+
+        Vec3 worldStart = START.add(4.0, 0.0, 0.0);
+        Vec3 worldEnd = END.add(4.0, 0.0, 0.0);
+
+        double original = propagation.factorForDirectWaveReception(worldStart, worldEnd, List.of(sublevel), 915_000_000.0, wave);
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0) * 0.75, original, 1.0e-12);
+
+        pose.position().set(4.0, 0.0, 8.0);
+        bounds.set(4, 64, 8, 7, 65, 9);
+
+        double moved = propagation.factorForDirectWaveReception(worldStart, worldEnd, List.of(sublevel), 915_000_000.0, wave);
+
+        assertEquals(1.0, moved, 1.0e-12);
+    }
 }

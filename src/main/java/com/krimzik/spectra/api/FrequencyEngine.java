@@ -5,12 +5,13 @@ import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.consumers.FrequencyDopplerMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyMatchConsumer;
 import com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer;
-import com.krimzik.spectra.api.material.MinecraftMaterialPropagation;
+import com.krimzik.spectra.api.material.*;
 import com.krimzik.spectra.api.motion.FrequencyMotion;
 import com.krimzik.spectra.api.motion.FrequencyMotionSnapshot;
 import com.krimzik.spectra.api.motion.FrequencyAccelerationTracker;
 import com.krimzik.spectra.api.registration.FrequencyRegistration;
 import com.krimzik.spectra.math.*;
+import com.krimzik.spectra.propagation.WaveMedium;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 
 import com.mojang.logging.LogUtils;
@@ -85,6 +86,7 @@ public final class FrequencyEngine {
 
     private final ServerLevel level;
     private final MinecraftMaterialPropagation pathAttenuation;
+    private final MinecraftCombinedWavePath receptionWave;
     private boolean stopped;
     private int activeQueries;
     private static final int MAX_POOLED_INTERFERENCE = 2;
@@ -94,6 +96,9 @@ public final class FrequencyEngine {
     FrequencyEngine(ServerLevel level) {
         this.level = Objects.requireNonNull(level);
         this.pathAttenuation = new MinecraftMaterialPropagation(level);
+
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0), FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 6.0, 0.0)), List.of());
+        this.receptionWave = new MinecraftCombinedWavePath(pathAttenuation, resolver);
     }
 
     private final class EmitterRegistration implements FrequencyRegistration {
@@ -1388,12 +1393,17 @@ public final class FrequencyEngine {
         double amplitude = FrequencyPropagation.amplitudeAtDistance(signal.amplitude(), distance);
 
         if (amplitude != 0.0) {
-            if (!shipCandidates.resolved) {
-                shipCandidates.ships = pathAttenuation.receiverCandidates(receiverWorldPos, shipCandidates.rangeMeters);
-                shipCandidates.resolved = true;
-            }
+            boolean reflection = FrequencyMaterialConfig.reflectionEnabled();
 
-            amplitude *= pathAttenuation.factorForReception(emitterWorldPos, receiverWorldPos, shipCandidates.ships);
+            if (reflection || FrequencyMaterialAttenuation.enabled()) {
+                if (!shipCandidates.resolved) {
+                    shipCandidates.ships = reflection ? pathAttenuation.waveReceiverCandidates(receiverWorldPos, shipCandidates.rangeMeters) : pathAttenuation.receiverCandidates(receiverWorldPos, shipCandidates.rangeMeters);
+                    shipCandidates.resolved = true;
+                }
+
+                double factor = reflection ? pathAttenuation.factorForDirectWaveReception(emitterWorldPos, receiverWorldPos, shipCandidates.ships, signal.frequencyHz(), receptionWave) : pathAttenuation.factorForReception(emitterWorldPos, receiverWorldPos, shipCandidates.ships);
+                amplitude *= factor;
+            }
         }
 
         double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());

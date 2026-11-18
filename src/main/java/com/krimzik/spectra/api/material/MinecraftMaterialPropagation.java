@@ -16,6 +16,7 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
     private final FrequencyMaterialPathCache worldCache;
     private MaterialPathOverlay combinedWorkspace;
     private boolean combinedWorkspaceBusy;
+    private final SegmentAabbClip.Interval waveShipInterval = new SegmentAabbClip.Interval();
 
     public MinecraftMaterialPropagation(ServerLevel level) {
         this.level = Objects.requireNonNull(level);
@@ -34,6 +35,41 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
         double ships = candidates == null ? FrequencySableMaterialAttenuation.factor(level, start, end) : FrequencySableMaterialAttenuation.factorForSublevels(level, start, end, candidates);
 
         return world * ships;
+    }
+
+    public double factorForDirectWaveReception(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates, double frequencyHz, MinecraftCombinedWavePath wave) {
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(candidates);
+        Objects.requireNonNull(wave);
+
+        List<? extends SubLevelAccess> intersecting = candidates;
+
+        if (!candidates.isEmpty()) {
+            boolean intersects = false;
+
+            for (SubLevelAccess sublevel : candidates) {
+                var bounds = sublevel.boundingBox();
+
+                if (SegmentAabbClip.clip(start.x, start.y, start.z, end.x, end.y, end.z, bounds.minX(), bounds.minY(), bounds.minZ(), bounds.maxX(), bounds.maxY(), bounds.maxZ(), waveShipInterval)) {
+                    intersects = true;
+                    break;
+                }
+            }
+
+            if (!intersects) {
+                intersecting = List.of();
+            }
+        }
+
+        double result = wave.evaluate(start, end, intersecting, frequencyHz, true);
+
+        if (Double.isFinite(result) && result >= 0.0) {
+            return result;
+        }
+
+        double fallback = factorForReception(start, end, intersecting);
+        return Double.isFinite(fallback) && fallback >= 0.0 ? fallback : 0.0;
     }
 
     public double factorWithWorldBoundaries(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
