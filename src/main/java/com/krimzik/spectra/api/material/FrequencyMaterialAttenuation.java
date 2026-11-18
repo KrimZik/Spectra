@@ -323,6 +323,25 @@ public final class FrequencyMaterialAttenuation {
                 if (trace != null) {
                     trace.observe(section, materialCache);
                 }
+
+                if (t == 0.0 && (((int) Math.floor(endX)) >> 4) == chunkX && (((int) Math.floor(endY)) >> 4) == cachedSectionY && (((int) Math.floor(endZ)) >> 4) == chunkZ) {
+                    double sectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : materialCache == null ? Double.NaN : materialCache.sectionLoss();
+                    if (Double.isFinite(sectionLoss)) {
+                        ResourceLocation material = consumer == null ? null : emptySection ? FrequencyMaterialClassifier.AIR : materialCache.sectionMaterial();
+                        if (consumer == null || material != null) {
+                            if (consumer != null) {
+                                consumer.acceptWithLoss(material, 0.0, 1.0, 0, sectionLoss);
+                            }
+
+                            if (!enabled) {
+                                return 1.0;
+                            }
+
+                            double totalLoss = (sectionLoss - airBaseline) * distance;
+                            return relativeToAir ? FrequencyMaterialRules.relativeAmplitudeFactor(totalLoss) : FrequencyMaterialRules.amplitudeFactor(totalLoss);
+                        }
+                    }
+                }
             }
 
             if (y >= minY && y < maxY) {

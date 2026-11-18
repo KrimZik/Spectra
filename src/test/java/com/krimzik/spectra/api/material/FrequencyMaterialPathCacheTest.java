@@ -732,4 +732,31 @@ class FrequencyMaterialPathCacheTest {
         verify(source, times(2)).getChunkNow(0, 0);
         verify(source, times(1)).getChunkNow(114, 0);
     }
+
+    @Test
+    void uniformSectionUsesDirectAttenuationWithoutTraversal() {
+        when(firstSummary.sectionLoss()).thenReturn(3.0);
+        when(firstSummary.sectionMaterial()).thenReturn(FrequencyMaterialClassifier.STONE);
+        when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenReturn(Blocks.STONE.defaultBlockState());
+
+        List<ResourceLocation> materials = new ArrayList<>();
+        FrequencyMaterialAttenuation.TraversalStats stats = FrequencyMaterialAttenuation.beginTraversalStats();
+
+        double result;
+        try {
+            result = FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, (materialId, from, to, axes) -> {
+                materials.add(materialId);assertEquals(0.0, from, 0.0);
+                assertEquals(1.0, to, 0.0);
+            });
+        } finally {
+            FrequencyMaterialAttenuation.endTraversalStats();
+        }
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), result, 1.0e-12);
+        assertEquals(List.of(FrequencyMaterialClassifier.STONE), materials);
+        assertEquals(1, stats.sections);
+        assertEquals(0, stats.uniformSections);
+
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
 }
