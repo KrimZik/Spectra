@@ -435,4 +435,37 @@ class FrequencyMaterialPathCacheTest {
         assertEquals(List.of(FrequencyMaterialClassifier.AIR, FrequencyMaterialClassifier.METAL, FrequencyMaterialClassifier.AIR), materials);
         assertTrue(cache.stats().sectionInvalidations() > 0);
     }
+
+    @Test
+    void detailedCachePreservesBlockSpecificAttenuation() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:stone"), 10.0)));
+        List<Double> losses = new ArrayList<>();
+
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer =
+                new FrequencyMaterialAttenuation.MaterialSegmentConsumer() {
+                    @Override
+                    public void accept(ResourceLocation material, double start, double end, int axes) {
+                        fail("Missing attenuation");
+                    }
+
+                    @Override
+                    public void acceptWithLoss(ResourceLocation material, double start, double end, int axes, double dbPerMeter) {
+                        losses.add(dbPerMeter);
+                    }
+                };
+
+        double first = cache.factorWithLossSegments(start, end, consumer);
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(10.0), first, 1.0e-12);
+        assertEquals(List.of(0.0, 10.0, 0.0), losses);
+
+        losses.clear();
+        clearInvocations(section);
+
+        double second = cache.factorWithLossSegments(start, end, consumer);
+
+        assertEquals(first, second, 0.0);
+        assertEquals(List.of(0.0, 10.0, 0.0), losses);
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
 }

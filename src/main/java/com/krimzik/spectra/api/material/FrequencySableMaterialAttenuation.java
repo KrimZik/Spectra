@@ -23,6 +23,11 @@ public final class FrequencySableMaterialAttenuation {
         void accept(SubLevelAccess sublevel, ResourceLocation material, double startFraction, double endFraction, int localEnteredAxes);
     }
 
+    @FunctionalInterface
+    public interface ShipLossSegmentConsumer {
+        void accept(SubLevelAccess sublevel, ResourceLocation material, double startFraction, double endFraction, int localEnteredAxes, double decibelsPerMeter);
+    }
+
     private static final ThreadLocal<Workspace> WORKSPACE = ThreadLocal.withInitial(Workspace::new);
 
     private static final class Workspace implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
@@ -30,6 +35,7 @@ public final class FrequencySableMaterialAttenuation {
         final SegmentAabbClip.Interval interval = new SegmentAabbClip.Interval();
 
         ShipMaterialSegmentConsumer consumer;
+        ShipLossSegmentConsumer lossConsumer;
         SubLevelAccess sublevel;
         double enter;
         double span;
@@ -38,6 +44,16 @@ public final class FrequencySableMaterialAttenuation {
         @Override
         public void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes) {
             consumer.accept(sublevel, material, Math.fma(startFraction, span, enter), Math.fma(endFraction, span, enter), enteredAxes);
+        }
+
+        @Override
+        public void acceptWithLoss(ResourceLocation material, double startFraction, double endFraction, int enteredAxes, double decibelsPerMeter) {
+            if (lossConsumer == null) {
+                accept(material, startFraction, endFraction, enteredAxes);
+                return;
+            }
+
+            lossConsumer.accept(sublevel, material, Math.fma(startFraction, span, enter), Math.fma(endFraction, span, enter), enteredAxes, decibelsPerMeter);
         }
     }
 
@@ -103,15 +119,19 @@ public final class FrequencySableMaterialAttenuation {
     }
 
     public static double factorForSublevels(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels) {
-        return factorForSublevelsInternal(level, start, end, sublevels, null);
+        return factorForSublevelsInternal(level, start, end, sublevels, null, null);
     }
 
     static double factorForSublevelsWithMaterials(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels, ShipMaterialSegmentConsumer consumer) {
-        return factorForSublevelsInternal(level, start, end, sublevels, Objects.requireNonNull(consumer));
+        return factorForSublevelsInternal(level, start, end, sublevels, Objects.requireNonNull(consumer), null);
     }
 
-    private static double factorForSublevelsInternal(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels, ShipMaterialSegmentConsumer consumer) {
-        if ((consumer == null && !FrequencyMaterialAttenuation.enabled()) || start.equals(end) || sublevels.isEmpty()) {
+    static double factorForSublevelsWithLossSegments(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels, ShipLossSegmentConsumer consumer) {
+        return factorForSublevelsInternal(level, start, end, sublevels, null, Objects.requireNonNull(consumer));
+    }
+
+    private static double factorForSublevelsInternal(ServerLevel level, Vec3 start, Vec3 end, List<? extends SubLevelAccess> sublevels, ShipMaterialSegmentConsumer consumer, ShipLossSegmentConsumer lossConsumer) {
+        if ((consumer == null && lossConsumer == null && !FrequencyMaterialAttenuation.enabled()) || start.equals(end) || sublevels.isEmpty()) {
             return 1.0;
         }
 
@@ -169,10 +189,11 @@ public final class FrequencySableMaterialAttenuation {
                 double localEndZ = scratch.z;
 
                 double localFactor;
-                if (consumer == null) {
+                if (consumer == null && lossConsumer == null) {
                     localFactor = MinecraftMaterialPathSampler.INSTANCE.factor(level, localStartX, localStartY, localStartZ, localEndX, localEndY, localEndZ, true);
                 } else {
                     work.consumer = consumer;
+                    work.lossConsumer = lossConsumer;
                     work.sublevel = sublevel;
                     work.enter = enter;
                     work.span = exit - enter;
@@ -180,6 +201,7 @@ public final class FrequencySableMaterialAttenuation {
                     localFactor = FrequencyMaterialAttenuation.factorRelativeToAirWithMaterials(level, localStartX, localStartY, localStartZ, localEndX, localEndY, localEndZ, work);
 
                     work.consumer = null;
+                    work.lossConsumer = null;
                     work.sublevel = null;
                 }
 
@@ -216,6 +238,7 @@ public final class FrequencySableMaterialAttenuation {
         } finally {
             if (work != null) {
                 work.consumer = null;
+                work.lossConsumer = null;
                 work.sublevel = null;
                 work.busy = false;
             }

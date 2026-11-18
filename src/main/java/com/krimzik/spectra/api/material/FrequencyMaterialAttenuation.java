@@ -52,6 +52,10 @@ public final class FrequencyMaterialAttenuation {
     @FunctionalInterface
     public interface MaterialSegmentConsumer {
         void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes);
+
+        default void acceptWithLoss(ResourceLocation material, double startFraction, double endFraction, int enteredAxes, double decibelsPerMeter) {
+            accept(material, startFraction, endFraction, enteredAxes);
+        }
     }
 
     private static double boundaryTime(double offset, double direction, double inverseDirection) {
@@ -308,7 +312,7 @@ public final class FrequencyMaterialAttenuation {
                         loss = MaterialAttenuationMath.accumulateLoss(loss, regionLoss - airBaseline, distance * (exit - t));
 
                         if (consumer != null) {
-                            consumer.accept(regionMaterial, t, exit, enteredAxes);
+                            consumer.acceptWithLoss(regionMaterial, t, exit, enteredAxes, regionLoss);
                         }
 
                         if (exit >= 1.0) {
@@ -365,7 +369,7 @@ public final class FrequencyMaterialAttenuation {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
 
                     if (consumer != null) {
-                        consumer.accept(FrequencyMaterialClassifier.AIR, t, next, enteredAxes);
+                        consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, FrequencyMaterialRules.airLossDbPerMeter());
                     }
                 } else {
                     BlockState state;
@@ -389,13 +393,13 @@ public final class FrequencyMaterialAttenuation {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
 
                     if (consumer != null) {
-                        consumer.accept(FrequencyMaterialClassifier.classify(state), t, next, enteredAxes);
+                        consumer.acceptWithLoss(FrequencyMaterialClassifier.classify(state), t, next, enteredAxes, lossPerMeter);
                     }
                 }
             }
 
             if (consumer != null && next > t && (y < minY || y >= maxY)) {
-                consumer.accept(FrequencyMaterialClassifier.AIR, t, next, enteredAxes);
+                consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, FrequencyMaterialRules.airLossDbPerMeter());
             }
 
             t = next;

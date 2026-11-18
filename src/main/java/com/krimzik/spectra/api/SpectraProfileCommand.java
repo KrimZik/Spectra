@@ -4,6 +4,7 @@ import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.material.*;
 import com.krimzik.spectra.propagation.WaveMedium;
+import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.logging.LogUtils;
 import com.sun.management.ThreadMXBean;
@@ -305,6 +306,69 @@ public final class SpectraProfileCommand {
 
             measure(count, "WORLD_WAVE_FRESH_CACHE", freshWaveCache, memory);
             measure(count, "WORLD_WAVE_CACHED", cachedWavePaths, memory);
+            MinecraftMaterialPropagation combinedPropagation = new MinecraftMaterialPropagation(level);
+            MinecraftCombinedWavePath combinedWave = new MinecraftCombinedWavePath(combinedPropagation, waveResolver);
+
+            Runnable combinedWorldWave = () -> {
+                for (Vec3 emitterWorld : paths) {
+                    double result = combinedWave.evaluate(
+                            emitterWorld, receiverWorld, java.util.List.of(), FREQUENCY, true
+                    );
+
+                    if (Double.isFinite(result)) {
+                        sink[0] += result;
+                    }
+                }
+            };
+
+            measure(count, "WORLD_WAVE_COMBINED_NO_SHIPS", combinedWorldWave, memory);
+
+            var waveCandidates = combinedPropagation.waveReceiverCandidates(receiverWorld, RANGE);
+            int intersectingPaths = 0;
+
+            if (!waveCandidates.isEmpty()) {
+                SegmentAabbClip.Interval interval = new SegmentAabbClip.Interval();
+                for (Vec3 emitterWorld : paths) {
+                    for (var ship : waveCandidates) {
+                        var bounds = ship.boundingBox();
+
+                        if (SegmentAabbClip.clip(emitterWorld.x, emitterWorld.y, emitterWorld.z, receiverWorld.x, receiverWorld.y, receiverWorld.z, bounds.minX(), bounds.minY(), bounds.minZ(), bounds.maxX(), bounds.maxY(), bounds.maxZ(), interval)) {
+                            intersectingPaths++;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            LOGGER.info("[SPECTRA-PROFILE] COMBINED_WAVE_SHIPS candidates={} intersectingPaths={} totalPaths={}", waveCandidates.size(), intersectingPaths, paths.length);
+
+            if (intersectingPaths > 0) {
+                int rejectedPaths = 0;
+
+                for (Vec3 emitterWorld : paths) {
+                    double result = combinedWave.evaluate(emitterWorld, receiverWorld, waveCandidates, FREQUENCY, true);
+
+                    if (!Double.isFinite(result)) {
+                        rejectedPaths++;
+                    }
+                }
+
+                LOGGER.info("[SPECTRA-PROFILE] COMBINED_WAVE_SHIPS rejectedPaths={}", rejectedPaths);
+                Runnable combinedShipWave = () -> {
+                    for (Vec3 emitterWorld : paths) {
+                        double result = combinedWave.evaluate(emitterWorld, receiverWorld, waveCandidates, FREQUENCY, true);
+                        if (Double.isFinite(result)) {
+                            sink[0] += result;
+                        }
+                    }
+                };
+
+                measure(count, "WORLD_SABLE_WAVE_COMBINED", combinedShipWave, memory);
+            } else {
+                LOGGER.info("[SPECTRA-PROFILE] WORLD_SABLE_WAVE_COMBINED skipped: no intersecting loaded ship");
+            }
+
+            LOGGER.info("[SPECTRA-PROFILE] COMBINED_WORLD_CACHE {}", combinedPropagation.worldCacheStats());
             LOGGER.info("[SPECTRA-PROFILE] WAVE_WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             org.slf4j.LoggerFactory.getLogger(SpectraProfileCommand.class).info("[SPECTRA-PROFILE] WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);

@@ -14,6 +14,7 @@ final class FrequencyMaterialPathCache {
     private static final int MAX_ENTRIES = 16_384;
     private static final int ADMISSION_SLOTS = 1 << 14;
     private static final int MAX_CACHED_BOUNDARIES = 128;
+    private static final int MAX_CACHED_LOSS_SEGMENTS = 256;
 
     private final ServerLevel level;
     private final HashMap<Vec3, HashMap<Vec3, Entry>> entries = new HashMap<>();
@@ -67,6 +68,7 @@ final class FrequencyMaterialPathCache {
 
         traceBuilds++;
         entry.boundaryGeometry = null;
+        entry.lossGeometry = null;
         Trace trace = new Trace();
         double result = FrequencyMaterialAttenuation.factorWithTrace(level, start, end, trace);
 
@@ -106,15 +108,20 @@ final class FrequencyMaterialPathCache {
 
     double factorWithBoundaries(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> consumer) {
         Objects.requireNonNull(consumer);
-        return factorWithMaterialData(start, end, consumer, null);
+        return factorWithMaterialData(start, end, consumer, null, null);
     }
 
     double factorWithSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
         Objects.requireNonNull(consumer);
-        return factorWithMaterialData(start, end, null, consumer);
+        return factorWithMaterialData(start, end, null, consumer, null);
     }
 
-    private double factorWithMaterialData(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> boundaryConsumer, FrequencyMaterialAttenuation.MaterialSegmentConsumer segmentConsumer) {
+    double factorWithLossSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(consumer);
+        return factorWithMaterialData(start, end, null, null, consumer);
+    }
+
+    private double factorWithMaterialData(Vec3 start, Vec3 end, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> boundaryConsumer, FrequencyMaterialAttenuation.MaterialSegmentConsumer segmentConsumer, FrequencyMaterialAttenuation.MaterialSegmentConsumer lossConsumer) {
         Objects.requireNonNull(start);
         Objects.requireNonNull(end);
 
@@ -136,33 +143,42 @@ final class FrequencyMaterialPathCache {
                 rulesInvalidations++;
             } else if (!entry.trace.current()) {
                 sectionInvalidations++;
-            } else if (entry.boundaryGeometry != null
-                    && (!enabled || Double.isFinite(entry.factor))) {
-                cacheHits++;
-
-                if (boundaryConsumer != null) {
-                    entry.boundaryGeometry.replay(boundaryConsumer);
-                } else {
-                    entry.boundaryGeometry.replaySegments(segmentConsumer);
+            } else if (!enabled || Double.isFinite(entry.factor)) {
+                if (lossConsumer != null && entry.lossGeometry != null) {
+                    cacheHits++;
+                    entry.lossGeometry.replay(lossConsumer);
+                    return enabled ? entry.factor : 1.0;
                 }
 
-                return enabled ? entry.factor : 1.0;
+                if (lossConsumer == null && entry.boundaryGeometry != null) {
+                    cacheHits++;
+
+                    if (boundaryConsumer != null) {
+                        entry.boundaryGeometry.replay(boundaryConsumer);
+                    } else {
+                        entry.boundaryGeometry.replaySegments(segmentConsumer);
+                    }
+
+                    return enabled ? entry.factor : 1.0;
+                }
             }
         }
 
         BoundaryRecorder recorder = new BoundaryRecorder();
         MaterialBoundaryCollector collector = new MaterialBoundaryCollector(recorder);
+        LossRecorder detailed = lossConsumer == null ? null : new LossRecorder(collector);
         Trace trace = entry == null ? null : new Trace();
 
         if (trace != null) {
             traceBuilds++;
         }
 
-        double result = FrequencyMaterialAttenuation.factorWithTraceAndMaterials(level, start, end, trace, collector);
+        double result = FrequencyMaterialAttenuation.factorWithTraceAndMaterials(level, start, end, trace, detailed == null ? collector : detailed);
 
         if (entry != null) {
             entry.trace = null;
             entry.boundaryGeometry = null;
+            entry.lossGeometry = null;
             entry.factor = Double.NaN;
 
             if (Double.isFinite(result) && trace.cacheable && revision == FrequencyMaterialRules.revision() && trace.current()) {
@@ -173,13 +189,19 @@ final class FrequencyMaterialPathCache {
                 if (recorder.count() <= MAX_CACHED_BOUNDARIES) {
                     entry.boundaryGeometry = recorder.snapshot(collector.firstMaterial());
                 }
+
+                if (detailed != null && detailed.count <= MAX_CACHED_LOSS_SEGMENTS) {
+                    entry.lossGeometry = detailed.snapshot();
+                }
             } else {
                 failedTraces++;
             }
         }
 
         if (Double.isFinite(result)) {
-            if (boundaryConsumer != null) {
+            if (detailed != null) {
+                detailed.replay(lossConsumer);
+            } else if (boundaryConsumer != null) {
                 recorder.replay(boundaryConsumer);
             } else {
                 recorder.replaySegments(collector.firstMaterial(), segmentConsumer);
@@ -302,6 +324,85 @@ final class FrequencyMaterialPathCache {
         }
     }
 
+    private static final class LossRecorder implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
+        private final MaterialBoundaryCollector boundaries;
+
+        private ResourceLocation[] materials = new ResourceLocation[8];
+        private double[] starts = new double[8];
+        private double[] ends = new double[8];
+        private double[] losses = new double[8];
+        private int[] axes = new int[8];
+
+        private int count;
+
+        private LossRecorder(MaterialBoundaryCollector boundaries) {
+            this.boundaries = boundaries;
+        }
+
+        @Override
+        public void accept(ResourceLocation material, double start, double end, int enteredAxes) {
+            throw new IllegalStateException("Missing material attenuation");
+        }
+
+        @Override
+        public void acceptWithLoss(ResourceLocation material, double start, double end, int enteredAxes, double decibelsPerMeter) {
+            boundaries.accept(material, start, end, enteredAxes);
+
+            if (count > 0 && materials[count - 1].equals(material) && losses[count - 1] == decibelsPerMeter && ends[count - 1] == start) {
+                ends[count - 1] = end;
+                return;
+            }
+
+            if (count == materials.length) {
+                int capacity = materials.length << 1;
+                materials = Arrays.copyOf(materials, capacity);
+                starts = Arrays.copyOf(starts, capacity);
+                ends = Arrays.copyOf(ends, capacity);
+                losses = Arrays.copyOf(losses, capacity);
+                axes = Arrays.copyOf(axes, capacity);
+            }
+
+            materials[count] = material;
+            starts[count] = start;
+            ends[count] = end;
+            losses[count] = decibelsPerMeter;
+            axes[count] = enteredAxes;
+            count++;
+        }
+
+        LossGeometry snapshot() {
+            return new LossGeometry(Arrays.copyOf(materials, count), Arrays.copyOf(starts, count), Arrays.copyOf(ends, count), Arrays.copyOf(losses, count), Arrays.copyOf(axes, count));
+        }
+
+        void replay(FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+            for (int i = 0; i < count; i++) {
+                consumer.acceptWithLoss(materials[i], starts[i], ends[i], axes[i], losses[i]);
+            }
+        }
+    }
+
+    private static final class LossGeometry {
+        private final ResourceLocation[] materials;
+        private final double[] starts;
+        private final double[] ends;
+        private final double[] losses;
+        private final int[] axes;
+
+        private LossGeometry(ResourceLocation[] materials, double[] starts, double[] ends, double[] losses, int[] axes) {
+            this.materials = materials;
+            this.starts = starts;
+            this.ends = ends;
+            this.losses = losses;
+            this.axes = axes;
+        }
+
+        void replay(FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+            for (int i = 0; i < materials.length; i++) {
+                consumer.acceptWithLoss(materials[i], starts[i], ends[i], axes[i], losses[i]);
+            }
+        }
+    }
+
     private static final class BoundaryRecorder implements MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> {
         private ResourceLocation first;
         private ResourceLocation[] materials = new ResourceLocation[8];
@@ -393,6 +494,7 @@ final class FrequencyMaterialPathCache {
         long rulesRevision;
         Trace trace;
         BoundaryGeometry boundaryGeometry;
+        LossGeometry lossGeometry;
 
         Entry previous;
         Entry next;

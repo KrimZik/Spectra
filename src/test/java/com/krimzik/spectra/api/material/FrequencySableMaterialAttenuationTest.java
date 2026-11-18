@@ -1,8 +1,10 @@
 package com.krimzik.spectra.api.material;
 
+import com.krimzik.spectra.propagation.WaveMedium;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -26,8 +29,7 @@ class FrequencySableMaterialAttenuationTest {
     private static final Vec3 START = new Vec3(0.5, 64.5, 0.5);
     private static final Vec3 END = new Vec3(2.5, 64.5, 0.5);
 
-    private final AtomicReference<BlockState> material =
-            new AtomicReference<>(Blocks.IRON_BLOCK.defaultBlockState());
+    private final AtomicReference<BlockState> material = new AtomicReference<>(Blocks.IRON_BLOCK.defaultBlockState());
 
     private ServerLevel level;
     private SubLevelAccess sublevel;
@@ -166,17 +168,11 @@ class FrequencySableMaterialAttenuationTest {
 
         List<double[]> metalSegments = new ArrayList<>();
 
-        double result = FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(
-                level,
-                START,
-                END,
-                List.of(sublevel),
-                (ship, materialId, from, to, axes) -> {
-                    if (FrequencyMaterialClassifier.METAL.equals(materialId)) {
-                        metalSegments.add(new double[]{from, to});
-                    }
-                }
-        );
+        double result = FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(level, START, END, List.of(sublevel), (ship, materialId, from, to, axes) -> {
+            if (FrequencyMaterialClassifier.METAL.equals(materialId)) {
+                metalSegments.add(new double[]{from, to});
+            }
+        });
 
         assertEquals(1.0, result, 0.0);
         assertEquals(1, metalSegments.size());
@@ -194,5 +190,81 @@ class FrequencySableMaterialAttenuationTest {
 
         assertEquals(1.0, result, 0.0);
         assertTrue(materials.isEmpty());
+    }
+
+    @Test
+    void combinedMaterialSegmentsFollowMovingShip() {
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+
+        pose.position().set(4.0, 0.0, 0.0);
+        bounds.set(4, 64, 0, 7, 65, 1);
+
+        Vec3 worldStart = START.add(4.0, 0.0, 0.0);
+        Vec3 worldEnd = END.add(4.0, 0.0, 0.0);
+
+        List<ResourceLocation> materials = new ArrayList<>();
+        List<Double> starts = new ArrayList<>();
+        List<Double> ends = new ArrayList<>();
+
+        assertTrue(propagation.forEachCombinedMaterialSegment(worldStart, worldEnd, List.of(sublevel), (materialId, from, to, axes) -> {
+            materials.add(materialId);
+            starts.add(from);
+            ends.add(to);
+        }));
+
+        assertEquals(List.of(FrequencyMaterialClassifier.AIR, FrequencyMaterialClassifier.METAL, FrequencyMaterialClassifier.AIR), materials);
+        assertEquals(List.of(0.0, 0.25, 0.75), starts);
+        assertEquals(List.of(0.25, 0.75, 1.0), ends);
+
+        pose.position().set(4.0, 0.0, 8.0);
+        bounds.set(4, 64, 8, 7, 65, 9);
+
+        materials.clear();
+
+        assertTrue(propagation.forEachCombinedMaterialSegment(worldStart, worldEnd, List.of(sublevel), (materialId, from, to, axes) -> materials.add(materialId)));
+        assertEquals(List.of(FrequencyMaterialClassifier.AIR), materials);
+    }
+
+    @Test
+    void combinedWavePathUsesExactShipLossAndFollowsMotion() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:iron_block"), 10.0)));
+
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, resolver);
+
+        pose.position().set(4.0, 0.0, 0.0);
+        bounds.set(4, 64, 0, 7, 65, 1);
+
+        Vec3 worldStart = START.add(4.0, 0.0, 0.0);
+        Vec3 worldEnd = END.add(4.0, 0.0, 0.0);
+
+        double first = wave.evaluate(worldStart, worldEnd, List.of(sublevel), 915_000_000.0, true);
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(10.0) * 0.75, first, 1.0e-12);
+        assertEquals(2, wave.boundaryCount());
+
+        pose.position().set(4.0, 0.0, 8.0);
+        bounds.set(4, 64, 8, 7, 65, 9);
+
+        double moved = wave.evaluate(worldStart, worldEnd, List.of(sublevel), 915_000_000.0, true);
+
+        assertEquals(1.0, moved, 1.0e-12);
+        assertEquals(0, wave.boundaryCount());
+    }
+
+    @Test
+    void combinedShipTransmissionStillWorksWithAttenuationDisabled() {
+        FrequencyMaterialAttenuation.setEnabled(false);
+
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, resolver);
+        double result = wave.evaluate(START, END, List.of(sublevel), 915_000_000.0, true);
+
+        assertEquals(0.75, result, 1.0e-12);
+        assertEquals(1.0, wave.attenuationFactor(), 0.0);
+        assertEquals(2, wave.boundaryCount());
     }
 }

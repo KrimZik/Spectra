@@ -13,6 +13,8 @@ import java.util.Objects;
 public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3> {
     private final ServerLevel level;
     private final FrequencyMaterialPathCache worldCache;
+    private MaterialPathOverlay combinedWorkspace;
+    private boolean combinedWorkspaceBusy;
 
     public MinecraftMaterialPropagation(ServerLevel level) {
         this.level = Objects.requireNonNull(level);
@@ -39,6 +41,68 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
 
     public double factorWithWorldSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
         return worldCache.factorWithSegments(start, end, consumer);
+    }
+
+    public double factorWithWorldLossSegments(Vec3 start, Vec3 end, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        return worldCache.factorWithLossSegments(start, end, consumer);
+    }
+
+    public boolean forEachCombinedMaterialSegment(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        return forEachCombinedSegment(start, end, candidates, consumer, false);
+    }
+
+    public boolean forEachCombinedMaterialLossSegment(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer) {
+        return forEachCombinedSegment(start, end, candidates, consumer, true);
+    }
+
+    private boolean forEachCombinedSegment(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates, FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer, boolean detailed) {
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(candidates);
+        Objects.requireNonNull(consumer);
+
+        if (start.equals(end)) {
+            return true;
+        }
+
+        if (candidates.isEmpty()) {
+            double result = detailed ? worldCache.factorWithLossSegments(start, end, consumer) : worldCache.factorWithSegments(start, end, consumer);
+            return Double.isFinite(result);
+        }
+
+        boolean reusable = !combinedWorkspaceBusy;
+        MaterialPathOverlay workspace;
+
+        if (reusable) {
+            if (combinedWorkspace == null) {
+                combinedWorkspace = new MaterialPathOverlay();
+            }
+
+            workspace = combinedWorkspace;
+            combinedWorkspaceBusy = true;
+        } else {
+            workspace = new MaterialPathOverlay();
+        }
+
+        try {
+            workspace.reset();
+
+            double world = detailed ? worldCache.factorWithLossSegments(start, end, workspace) : worldCache.factorWithSegments(start, end, workspace);
+            if (!Double.isFinite(world)) {
+                return false;
+            }
+
+            double ships = detailed ? FrequencySableMaterialAttenuation.factorForSublevelsWithLossSegments(level, start, end, candidates, workspace) : FrequencySableMaterialAttenuation.factorForSublevelsWithMaterials(level, start, end, candidates, workspace);
+            if (!Double.isFinite(ships)) {
+                return false;
+            }
+
+            return detailed ? workspace.replayWithLoss(consumer) : workspace.replay(consumer);
+        } finally {
+            if (reusable) {
+                combinedWorkspaceBusy = false;
+            }
+        }
     }
 
     public void clearCachedPaths() {
