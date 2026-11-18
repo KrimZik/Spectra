@@ -373,21 +373,14 @@ class FrequencyMaterialPathCacheTest {
         List<Double> starts = new ArrayList<>();
         List<Double> ends = new ArrayList<>();
 
-        double factor = cache.factorWithSegments(
-                start, end,
-                (materialId, from, to, axes) -> {
-                    materials.add(materialId);
-                    starts.add(from);
-                    ends.add(to);
-                }
-        );
+        double factor = cache.factorWithSegments(start, end, (materialId, from, to, axes) -> {
+            materials.add(materialId);
+            starts.add(from);
+            ends.add(to);
+        });
 
         assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0), factor, 1.0e-12);
-        assertEquals(List.of(
-                FrequencyMaterialClassifier.AIR,
-                FrequencyMaterialClassifier.STONE,
-                FrequencyMaterialClassifier.AIR
-        ), materials);
+        assertEquals(List.of(FrequencyMaterialClassifier.AIR, FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.AIR), materials);
 
         assertEquals(List.of(0.0, 0.25, 0.75), starts);
         assertEquals(List.of(0.25, 0.75, 1.0), ends);
@@ -395,10 +388,7 @@ class FrequencyMaterialPathCacheTest {
         materials.clear();
         clearInvocations(section);
 
-        cache.factorWithSegments(
-                start, end,
-                (materialId, from, to, axes) -> materials.add(materialId)
-        );
+        cache.factorWithSegments(start, end, (materialId, from, to, axes) -> materials.add(materialId));
 
         assertEquals(3, materials.size());
         verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
@@ -410,14 +400,11 @@ class FrequencyMaterialPathCacheTest {
 
         List<ResourceLocation> materials = new ArrayList<>();
 
-        cache.factorWithSegments(
-                start, end,
-                (materialId, from, to, axes) -> {
-                    materials.add(materialId);
-                    assertEquals(0.0, from, 0.0);
-                    assertEquals(1.0, to, 0.0);
-                }
-        );
+        cache.factorWithSegments(start, end, (materialId, from, to, axes) -> {
+            materials.add(materialId);
+            assertEquals(0.0, from, 0.0);
+            assertEquals(1.0, to, 0.0);
+        });
 
         assertEquals(List.of(FrequencyMaterialClassifier.AIR), materials);
 
