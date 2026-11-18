@@ -2,6 +2,7 @@ package com.krimzik.spectra.api.material;
 
 import com.krimzik.spectra.propagation.PathAttenuation;
 import com.krimzik.spectra.propagation.geometry.MaterialBoundaryScanner;
+import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;

@@ -140,26 +140,24 @@ public final class SpectraProfileCommand {
             };
 
             Runnable spatial = () -> engine.forEachMatchingInRange(receiver, RANGE, (emitter, current, distanceSquared) -> sink[0] += distanceSquared);
-            Runnable indexedSpatial = () -> index.forEachWithin(
-                    receiverWorld.x, receiverWorld.y, receiverWorld.z, RANGE,
-                    emitter -> {
-                        if (!emitter.isEmitting()) {
-                            return;
-                        }
+            Runnable indexedSpatial = () -> index.forEachWithin(receiverWorld.x, receiverWorld.y, receiverWorld.z, RANGE, emitter -> {
+                if (!emitter.isEmitting()) {
+                    return;
+                }
 
-                        FrequencySignal current = emitter.signal();
-                        if (current.frequencyHz() != FREQUENCY) {
-                            return;
-                        }
+                FrequencySignal current = emitter.signal();
+                if (current.frequencyHz() != FREQUENCY) {
+                    return;
+                }
 
-                        Vec3 world = FrequencySpace.worldPosition(level, emitter.position());
-                        double distanceSquared = world.distanceToSqr(receiverWorld);
+                Vec3 world = FrequencySpace.worldPosition(level, emitter.position());
+                double distanceSquared = world.distanceToSqr(receiverWorld);
 
-                        if (distanceSquared <= RANGE * RANGE) {
-                            sink[0] += distanceSquared;
-                        }
-                    }
-            );
+                if (distanceSquared <= RANGE * RANGE) {
+                    sink[0] += distanceSquared;
+                }
+            });
+
             Runnable reception = () -> engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distanceSquared, amplitude, travelTime) -> sink[0] += amplitude + travelTime);
 
             measure(count, "LOOKUP", lookup, memory);
@@ -230,7 +228,6 @@ public final class SpectraProfileCommand {
 
             Runnable sableBoundsOnly = () -> {
                 SubLevelContainer container = SubLevelContainer.getContainer(level);
-
                 if (container == null || container.getLoadedCount() == 0) {
                     return;
                 }
@@ -268,7 +265,6 @@ public final class SpectraProfileCommand {
                     );
 
                     int matches = 0;
-
                     for (var sublevel : SableCompanion.INSTANCE.getAllIntersecting(level, bounds)) {
                         matches++;
                     }
@@ -311,9 +307,7 @@ public final class SpectraProfileCommand {
 
             Runnable combinedWorldWave = () -> {
                 for (Vec3 emitterWorld : paths) {
-                    double result = combinedWave.evaluate(
-                            emitterWorld, receiverWorld, java.util.List.of(), FREQUENCY, true
-                    );
+                    double result = combinedWave.evaluate(emitterWorld, receiverWorld, java.util.List.of(), FREQUENCY, true);
 
                     if (Double.isFinite(result)) {
                         sink[0] += result;
