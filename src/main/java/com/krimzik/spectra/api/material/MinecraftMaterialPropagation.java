@@ -142,6 +142,14 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
         }
     }
 
+    public void beginReceptionChunkBatch() {
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+    }
+
+    public void endReceptionChunkBatch() {
+        FrequencyMaterialAttenuation.endChunkBatch();
+    }
+
     public void clearCachedPaths() {
         worldCache.clear();
     }

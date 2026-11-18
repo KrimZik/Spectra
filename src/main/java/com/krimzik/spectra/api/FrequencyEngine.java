@@ -1326,8 +1326,14 @@ public final class FrequencyEngine {
 
         Vec3 receiverWorldPos = FrequencySpace.worldPosition(level, receiverPos);
         activeQueries++;
+        boolean chunkBatchStarted = false;
 
         try {
+            if (receptionConsumer != null && (FrequencyMaterialAttenuation.enabled() || FrequencyMaterialConfig.reflectionEnabled())) {
+                pathAttenuation.beginReceptionChunkBatch();
+                chunkBatchStarted = true;
+            }
+
             MaterialCandidates shipCandidates = receptionConsumer == null ? null : new MaterialCandidates(receiver, rangeMeters);
             int fixedCandidates = 0;
 
@@ -1366,7 +1372,13 @@ public final class FrequencyEngine {
                 }
             }
         } finally {
-            activeQueries--;
+            try {
+                if (chunkBatchStarted) {
+                    pathAttenuation.endReceptionChunkBatch();
+                }
+            } finally {
+                activeQueries--;
+            }
         }
     }
 

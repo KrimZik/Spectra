@@ -586,4 +586,51 @@ class FrequencyMaterialPathCacheTest {
 
         assertEquals(List.of(0.0), losses);
     }
+
+    @Test
+    void receptionBatchReusesChunksButReadsCurrentBlockStates() {
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer = (materialId, from, to, axes) -> {};
+
+        clearInvocations(source);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            double first = FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, consumer);
+
+            material.set(Blocks.IRON_BLOCK.defaultBlockState());
+
+            double second = FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, consumer);
+
+            assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0), first, 1.0e-12);
+            assertEquals(FrequencyMaterialRules.amplitudeFactor(6.0), second, 1.0e-12);
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(1)).getChunkNow(0, 0);
+    }
+
+    @Test
+    void receptionBatchDropsChunksAndDoesNotCacheMissingChunks() {
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer = (materialId, from, to, axes) -> {};
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            assertTrue(Double.isFinite(FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, consumer)));
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        when(source.getChunkNow(anyInt(), anyInt())).thenReturn(null);
+        clearInvocations(source);
+
+        FrequencyMaterialAttenuation.beginChunkBatch(level);
+        try {
+            assertTrue(Double.isNaN(FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, consumer)));
+            assertTrue(Double.isNaN(FrequencyMaterialAttenuation.factorWithMaterials(level, start, end, consumer)));
+        } finally {
+            FrequencyMaterialAttenuation.endChunkBatch();
+        }
+
+        verify(source, times(2)).getChunkNow(0, 0);
+    }
 }

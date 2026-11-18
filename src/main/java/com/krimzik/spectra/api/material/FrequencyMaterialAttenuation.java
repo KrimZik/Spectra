@@ -6,12 +6,14 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.Arrays;
 import java.util.Objects;
 
 public final class FrequencyMaterialAttenuation {
@@ -19,6 +21,60 @@ public final class FrequencyMaterialAttenuation {
 
     private static final ThreadLocal<TraversalStats> ACTIVE_STATS = new ThreadLocal<>();
     private static final ThreadLocal<BlockPos.MutableBlockPos> BLOCK_LOOKUP_POS = ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
+
+    private static final int CHUNK_CACHE_SIZE = 64;
+    private static final ThreadLocal<ChunkLookupBatch> ACTIVE_CHUNK_BATCH = new ThreadLocal<>();
+
+    private static final class ChunkLookupBatch {
+        final long[] keys = new long[CHUNK_CACHE_SIZE];
+        final LevelChunk[] chunks = new LevelChunk[CHUNK_CACHE_SIZE];
+
+        ServerLevel level;
+        int depth;
+
+        LevelChunk get(ServerChunkCache source, int x, int z) {
+            long key = ChunkPos.asLong(x, z);
+            long hash = key * 0x9E3779B97F4A7C15L;
+            int slot = (int) (hash ^ (hash >>> 32)) & (CHUNK_CACHE_SIZE - 1);
+
+            LevelChunk chunk = chunks[slot];
+            if (chunk != null && keys[slot] == key) {
+                return chunk;
+            }
+
+            chunk = source.getChunkNow(x, z);
+            keys[slot] = key;
+            chunks[slot] = chunk;
+            return chunk;
+        }
+    }
+
+    static void beginChunkBatch(ServerLevel level) {
+        Objects.requireNonNull(level);
+        ChunkLookupBatch batch = ACTIVE_CHUNK_BATCH.get();
+        if (batch == null) {
+            batch = new ChunkLookupBatch();
+            ACTIVE_CHUNK_BATCH.set(batch);
+        }
+
+        if (batch.depth == 0) {
+            batch.level = level;
+        }
+
+        batch.depth++;
+    }
+
+    static void endChunkBatch() {
+        ChunkLookupBatch batch = ACTIVE_CHUNK_BATCH.get();
+        if (batch == null || batch.depth == 0) {
+            throw new IllegalStateException("No active reception chunk batch");
+        }
+
+        if (--batch.depth == 0) {
+            Arrays.fill(batch.chunks, null);
+            batch.level = null;
+        }
+    }
 
     public static final class TraversalStats {
         long paths;
@@ -156,6 +212,11 @@ public final class FrequencyMaterialAttenuation {
         int cachedChunkZ = Integer.MIN_VALUE;
 
         ServerChunkCache chunkSource = level.getChunkSource();
+        ChunkLookupBatch chunkBatch = ACTIVE_CHUNK_BATCH.get();
+        if (chunkBatch != null && (chunkBatch.depth == 0 || chunkBatch.level != level)) {
+            chunkBatch = null;
+        }
+
         LevelChunk chunk = null;
         LevelChunkSection[] sections = null;
         LevelChunkSection section = null;
@@ -183,7 +244,7 @@ public final class FrequencyMaterialAttenuation {
             if (chunkX != cachedChunkX || chunkZ != cachedChunkZ) {
                 cachedChunkX = chunkX;
                 cachedChunkZ = chunkZ;
-                chunk = chunkSource.getChunkNow(chunkX, chunkZ);
+                chunk = chunkBatch == null ? chunkSource.getChunkNow(chunkX, chunkZ) : chunkBatch.get(chunkSource, chunkX, chunkZ);
                 sections = chunk == null ? null : chunk.getSections();
                 section = null;
                 materialCache = null;
