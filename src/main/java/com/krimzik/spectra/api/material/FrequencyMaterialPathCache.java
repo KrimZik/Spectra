@@ -19,6 +19,8 @@ final class FrequencyMaterialPathCache {
     private final ServerLevel level;
     private final HashMap<Vec3, HashMap<Vec3, Entry>> entries = new HashMap<>();
     private long[] admission;
+    private ScanWorkspace scanWorkspace;
+    private boolean scanWorkspaceBusy;
 
     private Entry oldest;
     private Entry newest;
@@ -164,51 +166,73 @@ final class FrequencyMaterialPathCache {
             }
         }
 
-        BoundaryRecorder recorder = new BoundaryRecorder();
-        MaterialBoundaryCollector collector = new MaterialBoundaryCollector(recorder);
-        LossRecorder detailed = lossConsumer == null ? null : new LossRecorder(collector);
-        Trace trace = entry == null ? null : new Trace();
+        boolean reusable = !scanWorkspaceBusy;
+        ScanWorkspace workspace;
 
-        if (trace != null) {
-            traceBuilds++;
+        if (reusable) {
+            if (scanWorkspace == null) {
+                scanWorkspace = new ScanWorkspace();
+            }
+
+            workspace = scanWorkspace;
+            scanWorkspaceBusy = true;
+        } else {
+            workspace = new ScanWorkspace();
         }
 
-        double result = FrequencyMaterialAttenuation.factorWithTraceAndMaterials(level, start, end, trace, detailed == null ? collector : detailed);
+        try {
+            workspace.reset();
 
-        if (entry != null) {
-            entry.trace = null;
-            entry.boundaryGeometry = null;
-            entry.lossGeometry = null;
-            entry.factor = Double.NaN;
+            BoundaryRecorder recorder = workspace.recorder;
+            MaterialBoundaryCollector collector = workspace.collector;
+            LossRecorder detailed = lossConsumer == null ? null : workspace.lossRecorder;
+            Trace trace = entry == null ? null : new Trace();
 
-            if (Double.isFinite(result) && trace.cacheable && revision == FrequencyMaterialRules.revision() && trace.current()) {
-                entry.factor = enabled ? result : Double.NaN;
-                entry.rulesRevision = revision;
-                entry.trace = trace;
+            if (trace != null) {
+                traceBuilds++;
+            }
 
-                if (recorder.count() <= MAX_CACHED_BOUNDARIES) {
-                    entry.boundaryGeometry = recorder.snapshot(collector.firstMaterial());
+            double result = FrequencyMaterialAttenuation.factorWithTraceAndMaterials(level, start, end, trace, detailed == null ? collector : detailed);
+
+            if (entry != null) {
+                entry.trace = null;
+                entry.boundaryGeometry = null;
+                entry.lossGeometry = null;
+                entry.factor = Double.NaN;
+
+                if (Double.isFinite(result) && trace.cacheable && revision == FrequencyMaterialRules.revision() && trace.current()) {
+                    entry.factor = enabled ? result : Double.NaN;
+                    entry.rulesRevision = revision;
+                    entry.trace = trace;
+
+                    if (recorder.count() <= MAX_CACHED_BOUNDARIES) {
+                        entry.boundaryGeometry = recorder.snapshot(collector.firstMaterial());
+                    }
+
+                    if (detailed != null && detailed.count <= MAX_CACHED_LOSS_SEGMENTS) {
+                        entry.lossGeometry = detailed.snapshot();
+                    }
+                } else {
+                    failedTraces++;
                 }
+            }
 
-                if (detailed != null && detailed.count <= MAX_CACHED_LOSS_SEGMENTS) {
-                    entry.lossGeometry = detailed.snapshot();
+            if (Double.isFinite(result)) {
+                if (detailed != null) {
+                    detailed.replay(lossConsumer);
+                } else if (boundaryConsumer != null) {
+                    recorder.replay(boundaryConsumer);
+                } else {
+                    recorder.replaySegments(collector.firstMaterial(), segmentConsumer);
                 }
-            } else {
-                failedTraces++;
+            }
+
+            return result;
+        } finally {
+            if (reusable) {
+                scanWorkspaceBusy = false;
             }
         }
-
-        if (Double.isFinite(result)) {
-            if (detailed != null) {
-                detailed.replay(lossConsumer);
-            } else if (boundaryConsumer != null) {
-                recorder.replay(boundaryConsumer);
-            } else {
-                recorder.replaySegments(collector.firstMaterial(), segmentConsumer);
-            }
-        }
-
-        return result;
     }
 
     void clear() {
@@ -324,6 +348,18 @@ final class FrequencyMaterialPathCache {
         }
     }
 
+    private static final class ScanWorkspace {
+        final BoundaryRecorder recorder = new BoundaryRecorder();
+        final MaterialBoundaryCollector collector = new MaterialBoundaryCollector(recorder);
+        final LossRecorder lossRecorder = new LossRecorder(collector);
+
+        void reset() {
+            recorder.reset();
+            collector.reset();
+            lossRecorder.reset();
+        }
+    }
+
     private static final class LossRecorder implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
         private final MaterialBoundaryCollector boundaries;
 
@@ -334,6 +370,10 @@ final class FrequencyMaterialPathCache {
         private int[] axes = new int[8];
 
         private int count;
+
+        void reset() {
+            count = 0;
+        }
 
         private LossRecorder(MaterialBoundaryCollector boundaries) {
             this.boundaries = boundaries;
@@ -409,6 +449,11 @@ final class FrequencyMaterialPathCache {
         private double[] fractions = new double[8];
         private byte[] axes = new byte[8];
         private int count;
+
+        void reset() {
+            first = null;
+            count = 0;
+        }
 
         @Override
         public void onBoundary(ResourceLocation from, ResourceLocation to, double fraction, int crossedAxes) {

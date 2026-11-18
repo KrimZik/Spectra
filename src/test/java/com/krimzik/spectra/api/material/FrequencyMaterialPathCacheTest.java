@@ -501,4 +501,89 @@ class FrequencyMaterialPathCacheTest {
         assertEquals(1.0, result, 0.0);
         assertTrue(Double.isNaN(wave.attenuationFactor()));
     }
+
+    @Test
+    void unifiedWorldFastPathMatchesCachedBoundarySolver() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:stone"), 10.0)));
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+
+        MinecraftCombinedWavePath combined = new MinecraftCombinedWavePath(propagation, resolver);
+        MinecraftWorldWavePath original = new MinecraftWorldWavePath(propagation, resolver);
+
+        double actual = combined.evaluate(start, end, List.of(), 915_000_000.0, true);
+        double expected = original.evaluate(start, end, 915_000_000.0, true);
+
+        assertEquals(expected, actual, 1.0e-12);
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(10.0) * 0.75, actual, 1.0e-12);
+        assertEquals(2, combined.boundaryCount());
+
+        clearInvocations(section);
+
+        assertEquals(actual, combined.evaluate(start, end, List.of(), 915_000_000.0, true), 0.0);
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void unifiedWorldFastPathPreservesIndependentPhysicsSettings() {
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, resolver);
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0), wave.evaluate(start, end, List.of(), 915_000_000.0, false), 1.0e-12);
+
+        FrequencyMaterialAttenuation.setEnabled(false);
+
+        assertEquals(0.75, wave.evaluate(start, end, List.of(), 915_000_000.0, true), 1.0e-12);
+        assertEquals(1.0, wave.attenuationFactor(), 0.0);
+        assertEquals(2, wave.boundaryCount());
+    }
+
+    @Test
+    void reusableColdWorkspaceResetsBoundariesBetweenPaths() {
+        List<String> boundaries = new ArrayList<>();
+
+        cache.factorWithBoundaries(start, end, (from, to, fraction, axes) -> boundaries.add(from + "->" + to));
+        assertEquals(List.of("spectra:air->spectra:stone", "spectra:stone->spectra:air"), boundaries);
+
+        material.set(Blocks.AIR.defaultBlockState());
+        boundaries.clear();
+
+        cache.factorWithBoundaries(start, new Vec3(2.6, 64.5, 0.5), (from, to, fraction, axes) -> boundaries.add(from + "->" + to));
+        assertTrue(boundaries.isEmpty());
+
+        material.set(Blocks.STONE.defaultBlockState());
+        boundaries.clear();
+
+        cache.factorWithBoundaries(start, new Vec3(2.7, 64.5, 0.5), (from, to, fraction, axes) -> boundaries.add(from + "->" + to));
+        assertEquals(List.of("spectra:air->spectra:stone", "spectra:stone->spectra:air"), boundaries);
+    }
+
+    @Test
+    void reusableColdWorkspaceResetsExactLossSegments() {
+        List<Double> losses = new ArrayList<>();
+
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer consumer =
+                new FrequencyMaterialAttenuation.MaterialSegmentConsumer() {
+                    @Override
+                    public void accept(ResourceLocation material, double from, double to, int axes) {
+                        fail("Expected exact loss");
+                    }
+
+                    @Override
+                    public void acceptWithLoss(ResourceLocation material, double from, double to, int axes, double loss) {
+                        losses.add(loss);
+                    }
+                };
+
+        cache.factorWithLossSegments(start, end, consumer);
+        assertEquals(List.of(0.0, 3.0, 0.0), losses);
+
+        material.set(Blocks.AIR.defaultBlockState());
+        losses.clear();
+
+        cache.factorWithLossSegments(start, new Vec3(2.6, 64.5, 0.5), consumer);
+
+        assertEquals(List.of(0.0), losses);
+    }
 }

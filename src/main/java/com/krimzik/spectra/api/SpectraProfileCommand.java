@@ -2,6 +2,8 @@ package com.krimzik.spectra.api;
 
 import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.TRx.FrequencyReceiver;
+import com.krimzik.spectra.api.consumers.FrequencyMatchConsumer;
+import com.krimzik.spectra.api.consumers.FrequencyReceptionConsumer;
 import com.krimzik.spectra.api.material.*;
 import com.krimzik.spectra.propagation.WaveMedium;
 import com.krimzik.spectra.propagation.geometry.SegmentAabbClip;
@@ -53,6 +55,15 @@ public final class SpectraProfileCommand {
                                 .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 10))
                                 .then(Commands.argument("nearPercent", IntegerArgumentType.integer(0, 100))
                                         .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "nearPercent")))))
+        );
+        event.getDispatcher().register(
+                Commands.literal("spectra_profile_receivers")
+                        .requires(source -> source.hasPermission(2))
+                        .executes(context -> profileReceivers(context.getSource(), 1000, 16))
+                        .then(Commands.argument("emitters", IntegerArgumentType.integer(10, 3000))
+                                .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 16))
+                                .then(Commands.argument("receivers", IntegerArgumentType.integer(1, 1000))
+                                        .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers")))))
         );
     }
 
@@ -367,7 +378,7 @@ public final class SpectraProfileCommand {
             org.slf4j.LoggerFactory.getLogger(SpectraProfileCommand.class).info("[SPECTRA-PROFILE] WORLD_CACHE {}", batchedPropagation.worldCacheStats());
             measure(count, "SABLE_QUERY_ONLY", sableQueryOnly, memory);
             FrequencyMaterialAttenuation.setEnabled(false);
-            measure(count, "RECEPTION_NO_MATERIALS", reception, memory);
+            measure(count, "RECEPTION_ATTENUATION_OFF", reception, memory);
             FrequencyMaterialAttenuation.setEnabled(originalMaterials);
             measure(count, "RECEPTION_RESTORED", reception, memory);
 
@@ -379,6 +390,96 @@ public final class SpectraProfileCommand {
             FrequencyMaterialAttenuation.setEnabled(originalMaterials);
             engine.shutdown();
         }
+    }
+
+    private static int profileReceivers(CommandSourceStack source, int emitterCount, int receiverCount) {
+        ServerLevel level = source.getLevel();
+        FrequencyEngine engine = new FrequencyEngine(level);
+        double[] sink = {0.0};
+
+        try {
+            Vec3 origin = source.getPosition();
+            FrequencySignal signal = new FrequencySignal(FREQUENCY, 1.0, 0.0, 343.0);
+
+            for (int i = 0; i < emitterCount; i++) {
+                Vec3 position = origin.add(
+                        i % 21 - 10,
+                        (i / 441) % 21 - 10,
+                        (i / 21) % 21 - 10
+                );
+
+                engine.registerChunkBound(
+                        net.minecraft.core.BlockPos.containing(position),
+                        new Emitter(position, signal)
+                );
+            }
+
+            int samples = receiverCount > 32 ? 3 : 5;
+            Receiver[] stationary = new Receiver[receiverCount];
+            Receiver[][] stationaryFrames = new Receiver[samples][];
+            Receiver[][] movingFrames = new Receiver[samples][receiverCount];
+
+            for (int i = 0; i < receiverCount; i++) {
+                double x = receiverCount > 32 ? i % 32 - 15.5 : (i % 8 - 3.5) * 3.0;
+                double z = receiverCount > 32 ? i / 32 - 15.5 : (i / 8 - 1.5) * 3.0;
+
+                stationary[i] = new Receiver(origin.add(x, 0.0, z), FREQUENCY, 0.0);
+                for (int frame = 0; frame < movingFrames.length; frame++) {
+                    movingFrames[frame][i] = new Receiver(origin.add(x + (frame + 1) * 0.25, 0.0, z + (frame + 1) * 0.125), FREQUENCY, 0.0);
+                }
+            }
+
+            Arrays.fill(stationaryFrames, stationary);
+            FrequencyMatchConsumer matching = (emitter, current, distanceSquared) -> sink[0] += distanceSquared;
+            FrequencyReceptionConsumer reception = (emitter, current, distanceSquared, amplitude, travelTime) -> sink[0] += amplitude + travelTime;
+            ThreadMXBean memory = memoryBean();
+
+            LOGGER.info("[SPECTRA-PROFILE] MULTI_RECEIVER_SETUP emitters={} receivers={} pairsPerSweep={} range={}", emitterCount, receiverCount, (long) emitterCount * receiverCount, RANGE);
+            measureReceiverSweeps("MULTI_RECEIVER_SPATIAL", engine, stationaryFrames, matching, null, memory);
+
+            for (int warmup = 0; warmup < 2; warmup++) {
+                for (Receiver receiver : stationary) {
+                    engine.forEachReceivedInRange(receiver, RANGE, reception);
+                }
+            }
+
+            measureReceiverSweeps("MULTI_RECEIVER_STATIC", engine, stationaryFrames, null, reception, memory);
+            measureReceiverSweeps("MULTI_RECEIVER_MOVING", engine, movingFrames, null, reception, memory);
+
+            checksum = sink[0];
+            source.sendSuccess(() -> Component.literal("Multi-receiver profiling complete. Results in latest.log."), false);
+
+            return 1;
+        } finally {
+            engine.shutdown();
+        }
+    }
+
+    private static void measureReceiverSweeps(String stage, FrequencyEngine engine, Receiver[][] frames, FrequencyMatchConsumer matching, FrequencyReceptionConsumer reception, ThreadMXBean memory) {
+        double[] times = new double[frames.length];
+        double[] allocations = new double[frames.length];
+        long threadId = Thread.currentThread().threadId();
+
+        for (int sample = 0; sample < frames.length; sample++) {
+            long beforeBytes = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+            long start = System.nanoTime();
+
+            for (Receiver receiver : frames[sample]) {
+                if (reception != null) {
+                    engine.forEachReceivedInRange(receiver, RANGE, reception);
+                } else {
+                    engine.forEachMatchingInRange(receiver, RANGE, matching);
+                }
+            }
+
+            times[sample] = (System.nanoTime() - start) / 1_000_000.0;
+            allocations[sample] = memory == null ? -1.0 : memory.getThreadAllocatedBytes(threadId) - beforeBytes;
+        }
+
+        Arrays.sort(times);
+        Arrays.sort(allocations);
+
+        LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] stage=%s receivers=%d median=%.3f ms/sweep allocated=%.1f B/sweep", stage, frames[0].length, times[times.length / 2], allocations[allocations.length / 2]));
     }
 
     private static ThreadMXBean memoryBean() {

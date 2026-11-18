@@ -2,6 +2,7 @@ package com.krimzik.spectra.api.material;
 
 import com.krimzik.spectra.propagation.WaveBoundaryAccumulator;
 import com.krimzik.spectra.propagation.WaveMedium;
+import com.krimzik.spectra.propagation.geometry.MaterialBoundaryScanner;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.Vec3;
@@ -9,7 +10,7 @@ import net.minecraft.world.phys.Vec3;
 import java.util.List;
 import java.util.Objects;
 
-public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
+public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenuation.MaterialSegmentConsumer, MaterialBoundaryScanner.BoundaryConsumer<ResourceLocation> {
     private final MinecraftMaterialPropagation propagation;
     private final MinecraftWaveMediumResolver resolver;
     private final WaveBoundaryAccumulator boundaries = new WaveBoundaryAccumulator();
@@ -60,12 +61,22 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
         attenuationFactor = Double.NaN;
         boundaries.reset();
 
-        boolean complete = propagation.forEachCombinedMaterialLossSegment(start, end, candidates, this);
-        if (!complete) {
-            return Double.NaN;
+        if (candidates.isEmpty()) {
+            double attenuation = propagation.factorWithWorldBoundaries(start, end, this);
+            if (!Double.isFinite(attenuation)) {
+                return Double.NaN;
+            }
+
+            attenuationFactor = attenuation;
+        } else {
+            boolean complete = propagation.forEachCombinedMaterialLossSegment(start, end, candidates, this);
+            if (!complete) {
+                return Double.NaN;
+            }
+
+            attenuationFactor = attenuationEnabled ? FrequencyMaterialRules.amplitudeFactor(lossDb) : 1.0;
         }
 
-        attenuationFactor = attenuationEnabled ? FrequencyMaterialRules.amplitudeFactor(lossDb) : 1.0;
         return attenuationFactor * boundaries.directAmplitudeFactor();
     }
 
@@ -77,10 +88,7 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
     @Override
     public void acceptWithLoss(ResourceLocation material, double startFraction, double endFraction, int enteredAxes, double decibelsPerMeter) {
         if (previousMaterial != null && !previousMaterial.equals(material)) {
-            WaveMedium first = resolver.resolveMaterial(previousMaterial, frequencyHz);
-            WaveMedium second = resolver.resolveMaterial(material, frequencyHz);
-
-            boundaries.crossNormal(first, second, reflectionEnabled);
+            onBoundary(previousMaterial, material, startFraction, enteredAxes);
         }
 
         if (attenuationEnabled) {
@@ -88,6 +96,14 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
         }
 
         previousMaterial = material;
+    }
+
+    @Override
+    public void onBoundary(ResourceLocation from, ResourceLocation to, double fraction, int crossedAxes) {
+        WaveMedium first = resolver.resolveMaterial(from, frequencyHz);
+        WaveMedium second = resolver.resolveMaterial(to, frequencyHz);
+
+        boundaries.crossNormal(first, second, reflectionEnabled);
     }
 
     public double attenuationFactor() {
