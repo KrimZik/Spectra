@@ -17,12 +17,12 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
         this.worldCache = new FrequencyMaterialPathCache(level);
     }
 
-    public double factorForReception(Object receiver, Object emitter, Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates) {
+    public double factorForReception(Vec3 start, Vec3 end, List<? extends SubLevelAccess> candidates)  {
         if (!FrequencyMaterialAttenuation.enabled()) {
             return 1.0;
         }
 
-        double world = worldCache.factor(receiver, emitter, start, end);
+        double world = worldCache.factor(start, end);
         if (candidates != null && candidates.isEmpty()) {
             return world;
         }
@@ -35,11 +35,10 @@ public final class MinecraftMaterialPropagation implements PathAttenuation<Vec3>
         worldCache.clear();
     }
 
-    public record WorldCacheStats(long cacheHits, long coldMisses, long movedPaths, long traceBuilds, long rulesInvalidations, long sectionInvalidations, long failedTraces, long evictions, int entries) {}
+    public record WorldCacheStats(long cacheHits, long coldMisses, long traceBuilds, long rulesInvalidations, long sectionInvalidations, long failedTraces, long evictions, int entries) {}
     public WorldCacheStats worldCacheStats() {
         var stats = worldCache.stats();
-
-        return new WorldCacheStats(stats.cacheHits(), stats.coldMisses(), stats.movedPaths(), stats.traceBuilds(), stats.rulesInvalidations(), stats.sectionInvalidations(), stats.failedTraces(), stats.evictions(), stats.entries());
+        return new WorldCacheStats(stats.cacheHits(), stats.coldMisses(), stats.traceBuilds(), stats.rulesInvalidations(), stats.sectionInvalidations(), stats.failedTraces(), stats.evictions(), stats.entries());
     }
 
     public List<? extends SubLevelAccess> receiverCandidates(Vec3 receiver, double rangeMeters) {

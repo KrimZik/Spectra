@@ -5,20 +5,21 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Arrays;
-import java.util.IdentityHashMap;
+import java.util.HashMap;
 
 final class FrequencyMaterialPathCache {
-    private static final int MAX_ENTRIES = 4096;
+    private static final int MAX_ENTRIES = 16_384;
+    private static final int ADMISSION_SLOTS = 1 << 14;
 
     private final ServerLevel level;
-    private final IdentityHashMap<Object, IdentityHashMap<Object, Entry>> entries = new IdentityHashMap<>();
+    private final HashMap<Vec3, HashMap<Vec3, Entry>> entries = new HashMap<>();
+    private long[] admission;
 
     private Entry oldest;
     private Entry newest;
     private int size;
     private long cacheHits;
     private long coldMisses;
-    private long movedPaths;
     private long traceBuilds;
     private long rulesInvalidations;
     private long sectionInvalidations;
@@ -29,23 +30,28 @@ final class FrequencyMaterialPathCache {
         this.level = level;
     }
 
-    double factor(Object receiver, Object emitter, Vec3 start, Vec3 end) {
+    double factor(Vec3 start, Vec3 end) {
         if (!FrequencyMaterialAttenuation.enabled()) {
             return 1.0;
         }
 
-        IdentityHashMap<Object, Entry> row = entries.get(receiver);
-        Entry entry = row == null ? null : row.get(emitter);
+        HashMap<Vec3, Entry> row = entries.get(end);
+        Entry entry = row == null ? null : row.get(start);
 
         if (entry == null) {
             coldMisses++;
-            if (row == null) {
-                row = new IdentityHashMap<>();
-                entries.put(receiver, row);
+
+            if (size >= MAX_ENTRIES && !repeatCandidate(start, end)) {
+                return FrequencyMaterialAttenuation.factor(level, start, end);
             }
 
-            entry = new Entry(receiver, emitter, start, end);
-            row.put(emitter, entry);
+            if (row == null) {
+                row = new HashMap<>();
+                entries.put(end, row);
+            }
+
+            entry = new Entry(start, end);
+            row.put(start, entry);
             link(entry);
             size++;
 
@@ -57,14 +63,6 @@ final class FrequencyMaterialPathCache {
         }
 
         touch(entry);
-
-        if (!entry.start.equals(start) || !entry.end.equals(end)) {
-            movedPaths++;
-            entry.start = start;
-            entry.end = end;
-            entry.trace = null;
-            return FrequencyMaterialAttenuation.factor(level, start, end);
-        }
 
         long revision = FrequencyMaterialRules.revision();
 
@@ -80,10 +78,9 @@ final class FrequencyMaterialPathCache {
         }
 
         traceBuilds++;
-
         Trace trace = new Trace();
-
         double result = FrequencyMaterialAttenuation.factorWithTrace(level, start, end, trace);
+
         if (trace.cacheable && revision == FrequencyMaterialRules.revision() && trace.current()) {
             entry.factor = result;
             entry.rulesRevision = revision;
@@ -98,14 +95,15 @@ final class FrequencyMaterialPathCache {
 
     void clear() {
         entries.clear();
+        admission = null;
         oldest = null;
         newest = null;
         size = 0;
     }
 
-    record Stats(long cacheHits, long coldMisses, long movedPaths, long traceBuilds, long rulesInvalidations, long sectionInvalidations, long failedTraces, long evictions, int entries) {}
+    record Stats(long cacheHits, long coldMisses, long traceBuilds, long rulesInvalidations, long sectionInvalidations, long failedTraces, long evictions, int entries) {}
     Stats stats() {
-        return new Stats(cacheHits, coldMisses, movedPaths, traceBuilds, rulesInvalidations, sectionInvalidations, failedTraces, evictions, size);
+        return new Stats(cacheHits, coldMisses, traceBuilds, rulesInvalidations, sectionInvalidations, failedTraces, evictions, size);
     }
 
     private void link(Entry entry) {
@@ -148,23 +146,43 @@ final class FrequencyMaterialPathCache {
         Entry entry = oldest;
         unlink(entry);
 
-        IdentityHashMap<Object, Entry> row = entries.get(entry.receiver);
-        row.remove(entry.emitter);
+        HashMap<Vec3, Entry> row = entries.get(entry.end);
+        row.remove(entry.start);
 
         if (row.isEmpty()) {
-            entries.remove(entry.receiver);
+            entries.remove(entry.end);
         }
 
         size--;
         evictions++;
     }
 
-    private static final class Entry {
-        final Object receiver;
-        final Object emitter;
+    private boolean repeatCandidate(Vec3 start, Vec3 end) {
+        if (admission == null) {
+            admission = new long[ADMISSION_SLOTS];
+        }
 
-        Vec3 start;
-        Vec3 end;
+        int startHash = start.hashCode();
+        int endHash = end.hashCode();
+
+        long signature = ((long) startHash << 32) | (endHash & 0xffffffffL);
+
+        if (signature == 0L) {
+            signature = Long.MIN_VALUE;
+        }
+
+        int hash = startHash * 0x9e3779b9 + Integer.rotateLeft(endHash, 13);
+        int slot = (hash ^ (hash >>> 16)) & (ADMISSION_SLOTS - 1);
+
+        boolean repeated = admission[slot] == signature;
+        admission[slot] = signature;
+
+        return repeated;
+    }
+
+    private static final class Entry {
+        final Vec3 start;
+        final Vec3 end;
 
         double factor;
         long rulesRevision;
@@ -173,9 +191,7 @@ final class FrequencyMaterialPathCache {
         Entry previous;
         Entry next;
 
-        Entry(Object receiver, Object emitter, Vec3 start, Vec3 end) {
-            this.receiver = receiver;
-            this.emitter = emitter;
+        Entry(Vec3 start, Vec3 end) {
             this.start = start;
             this.end = end;
         }

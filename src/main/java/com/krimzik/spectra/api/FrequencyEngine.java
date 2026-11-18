@@ -1393,7 +1393,7 @@ public final class FrequencyEngine {
                 shipCandidates.resolved = true;
             }
 
-            amplitude *= pathAttenuation.factorForReception(shipCandidates.receiver, emitter, emitterWorldPos, receiverWorldPos, shipCandidates.ships);
+            amplitude *= pathAttenuation.factorForReception(emitterWorldPos, receiverWorldPos, shipCandidates.ships);
         }
 
         double travelTime = FrequencyPropagation.travelTimeSeconds(distance, signal.propagationSpeed());

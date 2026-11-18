@@ -26,9 +26,6 @@ class FrequencyMaterialPathCacheTest {
     private FrequencyMaterialSectionCache secondSummary;
     private FrequencyMaterialPathCache cache;
 
-    private final Object receiver = new Object();
-    private final Object emitter = new Object();
-
     private final Vec3 start = new Vec3(0.5, 64.5, 0.5);
     private final Vec3 end = new Vec3(2.5, 64.5, 0.5);
 
@@ -86,12 +83,12 @@ class FrequencyMaterialPathCacheTest {
     void unchangedPathReusesMaterialResult() {
         double expected = FrequencyMaterialRules.amplitudeFactor(3.0);
 
-        assertEquals(expected, cache.factor(receiver, emitter, start, end), 1.0e-12);
-        assertEquals(expected, cache.factor(receiver, emitter, start, end), 1.0e-12);
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
 
         clearInvocations(section);
 
-        assertEquals(expected, cache.factor(receiver, emitter, start, end), 1.0e-12);
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
         verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
     }
 
@@ -99,54 +96,92 @@ class FrequencyMaterialPathCacheTest {
     void changedSectionInvalidatesCachedPath() {
         double original = FrequencyMaterialRules.amplitudeFactor(3.0);
 
-        cache.factor(receiver, emitter, start, end);
-        cache.factor(receiver, emitter, start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
 
-        assertEquals(original, cache.factor(receiver, emitter, start, end), 1.0e-12);
+        assertEquals(original, cache.factor(start, end), 1.0e-12);
 
         material.set(Blocks.IRON_BLOCK.defaultBlockState());
         when(access.spectra$materialSummary()).thenReturn(secondSummary);
 
         double updated = FrequencyMaterialRules.amplitudeFactor(6.0);
 
-        assertEquals(updated, cache.factor(receiver, emitter, start, end), 1.0e-12);
+        assertEquals(updated, cache.factor(start, end), 1.0e-12);
     }
 
     @Test
     void changedMaterialRulesInvalidateCachedPath() {
-        cache.factor(receiver, emitter, start, end);
-        cache.factor(receiver, emitter, start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
 
         FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
 
         double expected = FrequencyMaterialRules.amplitudeFactor(3.25);
 
-        assertEquals(expected, cache.factor(receiver, emitter, start, end), 1.0e-12);
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
     }
 
     @Test
     void movingEndpointsCannotReusePreviousPath() {
-        cache.factor(receiver, emitter, start, end);
-        cache.factor(receiver, emitter, start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
 
         clearInvocations(section);
-        cache.factor(receiver, emitter, start, new Vec3(3.5, 64.5, 0.5));
+        cache.factor(start, new Vec3(3.5, 64.5, 0.5));
 
         verify(section, atLeastOnce()).getBlockState(anyInt(), anyInt(), anyInt());
     }
 
     @Test
     void stationaryPairBecomesCacheHit() {
-        cache.factor(receiver, emitter, start, end);
-        cache.factor(receiver, emitter, start, end);
-        cache.factor(receiver, emitter, start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
 
         var stats = cache.stats();
 
         assertEquals(1, stats.coldMisses());
         assertEquals(1, stats.traceBuilds());
         assertEquals(1, stats.cacheHits());
-        assertEquals(0, stats.movedPaths());
         assertEquals(0, stats.sectionInvalidations());
+    }
+
+    @Test
+    void differentCoordinateObjectsReuseIdenticalMaterialPath() {
+        double expected = FrequencyMaterialRules.amplitudeFactor(3.0);
+
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
+        assertEquals(expected, cache.factor(new Vec3(start.x, start.y, start.z), new Vec3(end.x, end.y, end.z)), 1.0e-12);
+
+        clearInvocations(section);
+
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
+
+        assertEquals(1, cache.stats().entries());
+        assertEquals(1, cache.stats().cacheHits());
+
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void overflowScanPreservesFrequentlyUsedGeometry() {
+        double expected = FrequencyMaterialRules.amplitudeFactor(3.0);
+
+        cache.factor(start, end);
+        cache.factor(start, end);
+        cache.factor(start, end);
+
+        long hitsBefore = cache.stats().cacheHits();
+
+        for (int i = 0; i < 20_000; i++) {
+            Vec3 otherStart = new Vec3(0.5 + (i + 1) * 1.0e-9, 64.5, 0.5);
+            cache.factor(otherStart, end);
+        }
+
+        assertEquals(16_384, cache.stats().entries());
+        assertTrue(cache.stats().evictions() < 32);
+
+        assertEquals(expected, cache.factor(start, end), 1.0e-12);
+        assertEquals(hitsBefore + 1, cache.stats().cacheHits());
     }
 }

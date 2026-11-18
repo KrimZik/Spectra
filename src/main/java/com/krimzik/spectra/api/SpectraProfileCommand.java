@@ -49,7 +49,7 @@ public final class SpectraProfileCommand {
                 Commands.literal("spectra_profile")
                         .requires(source -> source.hasPermission(2))
                         .executes(context -> profile(context.getSource(), 200, 10))
-                        .then(Commands.argument("emitters", IntegerArgumentType.integer(10, 100000))
+                        .then(Commands.argument("emitters", IntegerArgumentType.integer(10, 1000000))
                                 .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 10))
                                 .then(Commands.argument("nearPercent", IntegerArgumentType.integer(0, 100))
                                         .executes(context -> profile(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "nearPercent")))))
@@ -215,7 +215,7 @@ public final class SpectraProfileCommand {
 
             Runnable cachedWorldMaterials = () -> {
                 for (Vec3 emitterWorld : paths) {
-                    sink[0] += batchedPropagation.factorForReception(receiverWorld, emitterWorld, emitterWorld, receiverWorld, java.util.List.of());
+                    sink[0] += batchedPropagation.factorForReception(emitterWorld, receiverWorld, java.util.List.of());
                 }
             };
 
