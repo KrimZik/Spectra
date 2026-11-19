@@ -69,14 +69,21 @@ class FrequencyMaterialClassifierTest {
 
     @Test
     void materialReloadInvalidatesClassification() {
-        BlockState state = mock(BlockState.class);
-        when(state.getFluidState()).thenReturn(Fluids.EMPTY.defaultFluidState());
-        assertEquals(FrequencyMaterialClassifier.GENERIC, FrequencyMaterialClassifier.classify(state));
-
-        when(state.is(METAL)).thenReturn(true);
-        assertEquals(FrequencyMaterialClassifier.GENERIC, FrequencyMaterialClassifier.classify(state));
+        BlockState state = Blocks.STONE.defaultBlockState();
+        ResourceLocation custom = ResourceLocation.parse("test:custom_stone");
 
         FrequencyMaterialRules.replaceOverrides(List.of());
-        assertEquals(FrequencyMaterialClassifier.METAL, FrequencyMaterialClassifier.classify(state));
+
+        assertEquals(FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.classify(state));
+        assertEquals(FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.classify(state));
+
+        FrequencyMaterialRules.replaceMaterials(List.of(new FrequencyMaterialRules.Rule(ResourceLocation.parse("minecraft:stone"), null, custom, null)), java.util.Map.of());
+
+        assertEquals(custom, FrequencyMaterialClassifier.classify(state));
+        assertEquals(custom, FrequencyMaterialClassifier.classify(state));
+
+        FrequencyMaterialRules.replaceOverrides(List.of());
+
+        assertEquals(FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.classify(state));
     }
 }
