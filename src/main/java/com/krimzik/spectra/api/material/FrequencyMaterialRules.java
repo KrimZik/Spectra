@@ -8,6 +8,9 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -64,7 +67,8 @@ public final class FrequencyMaterialRules {
 
     private static volatile List<Rule> overrides = List.of();
     private static volatile Map<ResourceLocation, Properties> materials = Map.of();
-    private static volatile ConcurrentHashMap<BlockState, Double> attenuationCache = new ConcurrentHashMap<>();
+    private static final VarHandle LOSS_HANDLE = MethodHandles.arrayElementVarHandle(double[].class);
+    private static volatile double[] attenuationCache;
     private static volatile double airLossDbPerMeter;
     private static volatile double waterLossDbPerMeter = 0.5;
     private static volatile long materialRevision;
@@ -75,14 +79,14 @@ public final class FrequencyMaterialRules {
 
     private FrequencyMaterialRules() {}
 
-    public static void setEnvironmentLoss(double air, double water) {
+    public static synchronized void setEnvironmentLoss(double air, double water) {
         if (!Double.isFinite(air) || air < 0.0 || !Double.isFinite(water) || water < 0.0) {
             throw new IllegalArgumentException("Invalid environmental attenuation");
         }
 
         airLossDbPerMeter = air;
         waterLossDbPerMeter = water;
-        attenuationCache = new ConcurrentHashMap<>();
+        attenuationCache = null;
         materialRevision++;
     }
 
@@ -111,14 +115,14 @@ public final class FrequencyMaterialRules {
         replaceMaterials(rules, Map.of());
     }
 
-    public static void replaceMaterials(List<Rule> rules, Map<ResourceLocation, Properties> definitions) {
+    public static synchronized void replaceMaterials(List<Rule> rules, Map<ResourceLocation, Properties> definitions) {
         List<Rule> nextRules = List.copyOf(Objects.requireNonNull(rules));
         Map<ResourceLocation, Properties> nextMaterials = Map.copyOf(Objects.requireNonNull(definitions));
 
         overrides = nextRules;
         materials = nextMaterials;
         FrequencyMaterialClassifier.invalidate();
-        attenuationCache = new ConcurrentHashMap<>();
+        attenuationCache = null;
         materialRevision++;
     }
 
@@ -162,7 +166,37 @@ public final class FrequencyMaterialRules {
 
     public static double decibelsPerMeter(BlockState state) {
         Objects.requireNonNull(state);
-        return attenuationCache.computeIfAbsent(state, FrequencyMaterialRules::calculateLoss);
+
+        int id = Block.BLOCK_STATE_REGISTRY.getId(state);
+        if (id < 0) {
+            return calculateLoss(state);
+        }
+
+        double[] values = attenuationCache;
+        if (values == null) {
+            synchronized (FrequencyMaterialRules.class) {
+                values = attenuationCache;
+
+                if (values == null) {
+                    values = new double[Block.BLOCK_STATE_REGISTRY.size()];
+                    Arrays.fill(values, -1.0);
+                    attenuationCache = values;
+                }
+            }
+        }
+
+        if (id >= values.length) {
+            return calculateLoss(state);
+        }
+
+        double cached = (double) LOSS_HANDLE.getAcquire(values, id);
+        if (cached >= 0.0) {
+            return cached;
+        }
+
+        double calculated = calculateLoss(state);
+        LOSS_HANDLE.setRelease(values, id, calculated);
+        return calculated;
     }
 
     private static double calculateLoss(BlockState state) {

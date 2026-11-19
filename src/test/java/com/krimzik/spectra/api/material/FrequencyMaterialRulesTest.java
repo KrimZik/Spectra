@@ -6,6 +6,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -71,5 +72,57 @@ class FrequencyMaterialRulesTest {
 
         FrequencyMaterialRules.setEnvironmentLoss(0.25, 0.5);
         assertEquals(0.25, FrequencyMaterialRules.decibelsPerMeter(air), 0.0);
+    }
+
+    @Test
+    void indexedCacheUpdatesWhenCustomMaterialPropertiesChange() {
+        ResourceLocation stoneId = ResourceLocation.parse("minecraft:stone");
+        ResourceLocation customId = ResourceLocation.parse("test:custom");
+        var stone = Blocks.STONE.defaultBlockState();
+
+        FrequencyMaterialRules.Rule rule = new FrequencyMaterialRules.Rule(stoneId, null, customId, null);
+        FrequencyMaterialRules.replaceMaterials(List.of(rule), Map.of(customId, new FrequencyMaterialRules.Properties(2.5, 1200.0, 3.0)));
+
+        assertEquals(2.5, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+        assertEquals(2.5, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+        assertEquals(customId, FrequencyMaterialClassifier.classify(stone));
+
+        FrequencyMaterialRules.replaceMaterials(List.of(rule), Map.of(customId, new FrequencyMaterialRules.Properties(7.5, 1200.0, 3.0)));
+
+        assertEquals(7.5, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+        assertEquals(customId, FrequencyMaterialClassifier.classify(stone));
+
+        FrequencyMaterialRules.replaceOverrides(List.of());
+
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+        assertEquals(FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.classify(stone));
+    }
+
+    @Test
+    void indexedClassificationUpdatesAcrossMaterialReloads() {
+        ResourceLocation stoneId = ResourceLocation.parse("minecraft:stone");
+        ResourceLocation firstId = ResourceLocation.parse("test:first");
+        ResourceLocation secondId = ResourceLocation.parse("test:second");
+
+        var stone = Blocks.STONE.defaultBlockState();
+        var glass = Blocks.GLASS.defaultBlockState();
+
+        FrequencyMaterialRules.replaceMaterials(List.of(new FrequencyMaterialRules.Rule(stoneId, null, firstId, null)), Map.of(firstId, new FrequencyMaterialRules.Properties(3.0, null, null)));
+
+        assertEquals(firstId, FrequencyMaterialClassifier.classify(stone));
+        assertEquals(firstId, FrequencyMaterialClassifier.classify(stone));
+        assertEquals(FrequencyMaterialClassifier.GLASS, FrequencyMaterialClassifier.classify(glass));
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+
+        FrequencyMaterialRules.replaceMaterials(List.of(new FrequencyMaterialRules.Rule(stoneId, null, secondId, null)), Map.of(secondId, new FrequencyMaterialRules.Properties(3.0, null, null)));
+
+        assertEquals(secondId, FrequencyMaterialClassifier.classify(stone));
+        assertEquals(FrequencyMaterialClassifier.GLASS, FrequencyMaterialClassifier.classify(glass));
+        assertEquals(3.0, FrequencyMaterialRules.decibelsPerMeter(stone), 0.0);
+
+        FrequencyMaterialRules.replaceOverrides(List.of());
+
+        assertEquals(FrequencyMaterialClassifier.STONE, FrequencyMaterialClassifier.classify(stone));
+        assertEquals(FrequencyMaterialClassifier.GLASS, FrequencyMaterialClassifier.classify(glass));
     }
 }

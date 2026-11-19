@@ -56,6 +56,7 @@ class FrequencyMaterialPathCacheTest {
         for (FrequencyMaterialSectionCache summary : List.of(firstSummary, secondSummary)) {
             when(summary.sectionLoss()).thenReturn(Double.NaN);
             when(summary.regionLoss(anyInt(), anyInt(), anyInt())).thenReturn(Double.NaN);
+            when(summary.twoBlockLoss(anyInt(), anyInt(), anyInt(), any())).thenReturn(Double.NaN);
         }
 
         when(access.spectra$materialSummary()).thenReturn(firstSummary);
@@ -785,12 +786,12 @@ class FrequencyMaterialPathCacheTest {
         FrequencyMaterialAttenuation.TraversalStats stats = FrequencyMaterialAttenuation.beginTraversalStats();
 
         try {
-            FrequencyMaterialSectionCache.TwoBlockRegion first = summary.twoBlockRegion(2, 0, 0, stats);
-            FrequencyMaterialSectionCache.TwoBlockRegion second = summary.twoBlockRegion(3, 1, 1, stats);
+            double first = summary.twoBlockLoss(2, 0, 0, stats);
+            double second = summary.twoBlockLoss(3, 1, 1, stats);
 
-            assertSame(first, second);
-            assertEquals(0.0, first.lossDbPerMeter(), 0.0);
-            assertEquals(FrequencyMaterialClassifier.AIR, first.material());
+            assertEquals(first, second, 0.0);
+            assertEquals(0.0, first, 0.0);
+            assertEquals(FrequencyMaterialClassifier.AIR, summary.twoBlockMaterial(3, 1, 1));
             assertEquals(1, stats.twoBlockBuilds);
             assertEquals(8, stats.twoBlockBuildReads);
         } finally {
@@ -802,11 +803,12 @@ class FrequencyMaterialPathCacheTest {
 
     @Test
     void twoBlockSkipPreservesAttenuationAndBoundaryPositions() {
-        when(firstSummary.twoBlockRegion(anyInt(), anyInt(), anyInt(), any()))
-                .thenAnswer(invocation -> {
-                    int x = invocation.getArgument(0);
-                    return x >= 2 && x < 4 ? new FrequencyMaterialSectionCache.TwoBlockRegion(0.0, FrequencyMaterialClassifier.AIR) : new FrequencyMaterialSectionCache.TwoBlockRegion(Double.NaN, null);
-                });
+        when(firstSummary.twoBlockLoss(anyInt(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
+            int x = invocation.getArgument(0);
+            return x >= 2 && x < 4 ? 0.0 : Double.NaN;
+        });
+
+        when(firstSummary.twoBlockMaterial(anyInt(), anyInt(), anyInt())).thenReturn(FrequencyMaterialClassifier.AIR);
 
         List<Double> fractions = new ArrayList<>();
 
@@ -849,9 +851,45 @@ class FrequencyMaterialPathCacheTest {
         FrequencyMaterialSectionCache summary = FrequencyMaterialSectionCache.create(section);
         assertNotNull(summary);
 
-        FrequencyMaterialSectionCache.TwoBlockRegion region = summary.twoBlockRegion(0, 0, 0, null);
+        double loss = summary.twoBlockLoss(0, 0, 0, null);
 
-        assertEquals(0.0, region.lossDbPerMeter(), 0.0);
-        assertNull(region.material());
+        assertEquals(0.0, loss, 0.0);
+        assertNull(summary.twoBlockMaterial(0, 0, 0));
+    }
+
+    @Test
+    void flatTwoBlockCacheKeepsDifferentCellsSeparate() {
+        @SuppressWarnings("unchecked")
+        PalettedContainer<BlockState> states = mock(PalettedContainer.class);
+
+        when(section.getStates()).thenReturn(states);
+
+        doAnswer(invocation -> {
+            java.util.function.Consumer<BlockState> visitor = invocation.getArgument(0);
+            visitor.accept(Blocks.AIR.defaultBlockState());
+            visitor.accept(Blocks.STONE.defaultBlockState());
+            return null;
+        }).when(states).getAll(any());
+
+        when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(invocation -> {
+            int x = invocation.getArgument(0);
+            return x < 2 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        });
+
+        FrequencyMaterialSectionCache summary = FrequencyMaterialSectionCache.create(section);
+        assertNotNull(summary);
+
+        assertEquals(3.0, summary.twoBlockLoss(0, 0, 0, null), 0.0);
+        assertEquals(0.0, summary.twoBlockLoss(2, 0, 0, null), 0.0);
+
+        assertEquals(FrequencyMaterialClassifier.STONE, summary.twoBlockMaterial(0, 0, 0));
+        assertEquals(FrequencyMaterialClassifier.AIR, summary.twoBlockMaterial(2, 0, 0));
+
+        clearInvocations(section);
+
+        assertEquals(3.0, summary.twoBlockLoss(1, 1, 1, null), 0.0);
+        assertEquals(0.0, summary.twoBlockLoss(3, 1, 1, null), 0.0);
+
+        verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
     }
 }

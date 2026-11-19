@@ -10,8 +10,9 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
 public final class FrequencyMaterialClassifier {
     public static final ResourceLocation AIR = id("air");
@@ -33,16 +34,48 @@ public final class FrequencyMaterialClassifier {
     private static final TagKey<Block> LOG_TAG = tag("logs");
     private static final TagKey<Block> WOOD_TAG = tag("wood");
 
-    private static volatile ConcurrentHashMap<BlockState, ResourceLocation> cache = new ConcurrentHashMap<>();
+    private static final VarHandle MATERIAL_HANDLE = MethodHandles.arrayElementVarHandle(ResourceLocation[].class);
+    private static volatile ResourceLocation[] cache;
 
     private FrequencyMaterialClassifier() {}
 
     public static ResourceLocation classify(BlockState state) {
-        return cache.computeIfAbsent(Objects.requireNonNull(state), FrequencyMaterialClassifier::detect);
+        Objects.requireNonNull(state);
+
+        int id = Block.BLOCK_STATE_REGISTRY.getId(state);
+        if (id < 0) {
+            return detect(state);
+        }
+
+        ResourceLocation[] values = cache;
+
+        if (values == null) {
+            synchronized (FrequencyMaterialClassifier.class) {
+                values = cache;
+
+                if (values == null) {
+                    values = new ResourceLocation[Block.BLOCK_STATE_REGISTRY.size()];
+                    cache = values;
+                }
+            }
+        }
+
+        if (id >= values.length) {
+            return detect(state);
+        }
+
+        ResourceLocation cached = (ResourceLocation) MATERIAL_HANDLE.getAcquire(values, id);
+        if (cached != null) {
+            return cached;
+        }
+
+        ResourceLocation material = detect(state);
+        MATERIAL_HANDLE.setRelease(values, id, material);
+        return material;
     }
 
     static void invalidate() {
-        cache = new ConcurrentHashMap<>();
+        cache = null;
     }
 
     private static ResourceLocation id(String name) {

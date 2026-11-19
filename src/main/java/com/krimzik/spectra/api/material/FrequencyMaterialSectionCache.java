@@ -5,6 +5,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.Arrays;
 
 public final class FrequencyMaterialSectionCache {
@@ -16,9 +18,10 @@ public final class FrequencyMaterialSectionCache {
     private static final Object MIXED = new Object();
     private volatile Object uniformMaterial = UNRESOLVED;
     private volatile Object[] regionMaterials;
-    private volatile TwoBlockRegion[][] twoBlockRegions;
+    private static final VarHandle TWO_BLOCK_LOSS = MethodHandles.arrayElementVarHandle(double[].class);
 
-    record TwoBlockRegion(double lossDbPerMeter, ResourceLocation material) {}
+    private volatile double[] twoBlockLosses;
+    private ResourceLocation[] twoBlockMaterials;
 
     private FrequencyMaterialSectionCache(LevelChunkSection section, long revision, double sectionLoss) {
         this.section = section;
@@ -102,34 +105,29 @@ public final class FrequencyMaterialSectionCache {
         return loss;
     }
 
-    TwoBlockRegion twoBlockRegion(int x, int y, int z, FrequencyMaterialAttenuation.TraversalStats stats) {
-        int parent = ((y >> 2) << 4) | ((z >> 2) << 2) | (x >> 2);
-        int child = (((y >> 1) & 1) << 2) | (((z >> 1) & 1) << 1) | ((x >> 1) & 1);
+    double twoBlockLoss(int x, int y, int z, FrequencyMaterialAttenuation.TraversalStats stats) {
+        int index = ((y >> 1) << 6) | ((z >> 1) << 3) | (x >> 1);
 
-        TwoBlockRegion[][] groups = twoBlockRegions;
-        if (groups != null) {
-            TwoBlockRegion[] cells = groups[parent];
-            if (cells != null) {
-                TwoBlockRegion cached = cells[child];
-                if (cached != null) {
-                    return cached;
-                }
+        double[] losses = twoBlockLosses;
+        if (losses != null) {
+            double cached = (double) TWO_BLOCK_LOSS.getAcquire(losses, index);
+            if (cached != Double.NEGATIVE_INFINITY) {
+                return cached;
             }
         }
 
         synchronized (this) {
-            if (twoBlockRegions == null) {
-                twoBlockRegions = new TwoBlockRegion[64][];
+            losses = twoBlockLosses;
+
+            if (losses == null) {
+                losses = new double[512];
+                Arrays.fill(losses, Double.NEGATIVE_INFINITY);
+                twoBlockMaterials = new ResourceLocation[512];
+                twoBlockLosses = losses;
             }
 
-            TwoBlockRegion[] cells = twoBlockRegions[parent];
-            if (cells == null) {
-                cells = new TwoBlockRegion[8];
-                twoBlockRegions[parent] = cells;
-            }
-
-            TwoBlockRegion cached = cells[child];
-            if (cached != null) {
+            double cached = (double) TWO_BLOCK_LOSS.getAcquire(losses, index);
+            if (cached != Double.NEGATIVE_INFINITY) {
                 return cached;
             }
 
@@ -168,16 +166,29 @@ public final class FrequencyMaterialSectionCache {
                 }
             }
 
-            cached = new TwoBlockRegion(sameLoss ? loss : Double.NaN, sameLoss && sameMaterial ? material : null);
-            cells[child] = cached;
+            double result = sameLoss ? loss : Double.NaN;
+
+            twoBlockMaterials[index] = sameLoss && sameMaterial ? material : null;
+            TWO_BLOCK_LOSS.setRelease(losses, index, result);
 
             if (stats != null) {
                 stats.twoBlockBuilds++;
                 stats.twoBlockBuildReads += reads;
             }
 
-            return cached;
+            return result;
         }
+    }
+
+    ResourceLocation twoBlockMaterial(int x, int y, int z) {
+        ResourceLocation[] materials = twoBlockMaterials;
+
+        if (materials == null) {
+            return null;
+        }
+
+        int index = ((y >> 1) << 6) | ((z >> 1) << 3) | (x >> 1);
+        return materials[index];
     }
 
     public ResourceLocation sectionMaterial() {

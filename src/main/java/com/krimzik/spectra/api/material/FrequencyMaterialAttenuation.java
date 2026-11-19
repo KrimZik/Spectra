@@ -400,11 +400,15 @@ public final class FrequencyMaterialAttenuation {
                         stats.twoBlockChecks++;
                     }
 
-                    FrequencyMaterialSectionCache.TwoBlockRegion smaller = materialCache.twoBlockRegion(x & 15, y & 15, z & 15, stats);
-                    if (smaller != null && smaller.lossDbPerMeter() >= 0.0 && (consumer == null || smaller.material() != null)) {
-                        shift = 1;
-                        regionLoss = smaller.lossDbPerMeter();
-                        regionMaterial = smaller.material();
+                    double smallerLoss = materialCache.twoBlockLoss(x & 15, y & 15, z & 15, stats);
+                    if (smallerLoss >= 0.0) {
+                        ResourceLocation smallerMaterial = consumer == null ? null : materialCache.twoBlockMaterial(x & 15, y & 15, z & 15);
+
+                        if (consumer == null || smallerMaterial != null) {
+                            shift = 1;
+                            regionLoss = smallerLoss;
+                            regionMaterial = smallerMaterial;
+                        }
                     }
                 }
 

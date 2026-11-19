@@ -16,7 +16,13 @@ import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -64,6 +70,11 @@ public final class SpectraProfileCommand {
                                 .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 16))
                                 .then(Commands.argument("receivers", IntegerArgumentType.integer(1, 1000))
                                         .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers")))))
+        );
+        event.getDispatcher().register(
+                Commands.literal("spectra_profile_material_lookup")
+                        .requires(source -> source.hasPermission(2))
+                        .executes(context -> profileMaterialLookups(context.getSource()))
         );
     }
 
@@ -607,6 +618,124 @@ public final class SpectraProfileCommand {
         Arrays.sort(allocations);
 
         LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] stage=%s paths=%d median=%.3f ms allocated=%.1f B", stage, (long) receivers * emitters, times[1], allocations[1]));
+    }
+
+    private static int profileMaterialLookups(CommandSourceStack source) {
+        ServerLevel level = source.getLevel();
+        Vec3 origin = source.getPosition();
+
+        BlockState[] states = new BlockState[256];
+        int centerX = (int) Math.floor(origin.x);
+        int centerY = (int) Math.floor(origin.y);
+        int centerZ = (int) Math.floor(origin.z);
+        int minY = level.getMinBuildHeight();
+        int maxY = level.getMaxBuildHeight();
+
+        int loaded = 0;
+
+        for (int i = 0; i < states.length; i++) {
+            int x = centerX + ((i & 15) << 1) - 15;
+            int z = centerZ + ((i >> 4) << 1) - 15;
+            int y = Math.max(minY, Math.min(maxY - 1, centerY + ((i * 7) & 15) - 8));
+
+            LevelChunk chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+            BlockState state = Blocks.AIR.defaultBlockState();
+
+            if (chunk != null) {
+                LevelChunkSection[] sections = chunk.getSections();
+                int index = (y >> 4) - (minY >> 4);
+
+                if (index >= 0 && index < sections.length && sections[index] != null) {
+                    state = sections[index].getBlockState(x & 15, y & 15, z & 15);
+                    loaded++;
+                }
+            }
+
+            states[i] = state;
+        }
+
+        int capacity = Block.BLOCK_STATE_REGISTRY.size();
+        double[] losses = new double[capacity];
+        ResourceLocation[] materials = new ResourceLocation[capacity];
+
+        java.util.Set<BlockState> distinct = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (BlockState state : states) {
+            int id = Block.BLOCK_STATE_REGISTRY.getId(state);
+
+            if (id < 0 || id >= capacity) {
+                throw new IllegalStateException("Unregistered block state");
+            }
+
+            losses[id] = FrequencyMaterialRules.decibelsPerMeter(state);
+            materials[id] = FrequencyMaterialClassifier.classify(state);
+            distinct.add(state);
+        }
+
+        final int iterations = 1_000_000;
+
+        Runnable[] tasks = {
+                () -> {
+                    double sum = 0.0;
+                    for (int i = 0; i < iterations; i++) {
+                        sum += FrequencyMaterialRules.decibelsPerMeter(states[i & 255]);
+                    }
+                    checksum = sum;
+                },
+                () -> {
+                    double sum = 0.0;
+                    for (int i = 0; i < iterations; i++) {
+                        int id = Block.BLOCK_STATE_REGISTRY.getId(states[i & 255]);
+                        sum += losses[id];
+                    }
+                    checksum = sum;
+                },
+                () -> {
+                    int count = 0;
+                    for (int i = 0; i < iterations; i++) {
+                        if (FrequencyMaterialClassifier.classify(states[i & 255]) == FrequencyMaterialClassifier.AIR) {
+                            count++;
+                        }
+                    }
+                    checksum = count;
+                },
+                () -> {
+                    int count = 0;
+                    for (int i = 0; i < iterations; i++) {
+                        int id = Block.BLOCK_STATE_REGISTRY.getId(states[i & 255]);
+                        if (materials[id] == FrequencyMaterialClassifier.AIR) {
+                            count++;
+                        }
+                    }
+                    checksum = count;
+                }
+        };
+
+        String[] names = {"MATERIAL_HASH_LOSS", "MATERIAL_ARRAY_LOSS", "MATERIAL_HASH_CLASSIFY", "MATERIAL_ARRAY_CLASSIFY"};
+        for (int i = 0; i < 32; i++) {
+            tasks[i & 3].run();
+        }
+
+        double[][] times = new double[tasks.length][7];
+
+        for (int sample = 0; sample < 7; sample++) {
+            for (int turn = 0; turn < tasks.length; turn++) {
+                int mode = (sample + turn) & 3;
+                long start = System.nanoTime();
+                tasks[mode].run();
+                times[mode][sample] = (System.nanoTime() - start) / (double) iterations;
+            }
+        }
+
+        LOGGER.info("[SPECTRA-PROFILE] MATERIAL_LOOKUP samples={} loaded={} distinctStates={}", states.length, loaded, distinct.size());
+
+        for (int mode = 0; mode < tasks.length; mode++) {
+            Arrays.sort(times[mode]);
+            LOGGER.info("[SPECTRA-PROFILE] stage={} median={} ns/lookup", names[mode], String.format(Locale.ROOT, "%.3f", times[mode][3]));
+        }
+
+        source.sendSuccess(() -> Component.literal("Material lookup profiling complete. Results in latest.log."), false);
+
+        return 1;
     }
 
     private static ThreadMXBean memoryBean() {
