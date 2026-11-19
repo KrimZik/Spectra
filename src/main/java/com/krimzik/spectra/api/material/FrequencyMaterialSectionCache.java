@@ -14,7 +14,6 @@ public final class FrequencyMaterialSectionCache {
     record Region8(double loss, ResourceLocation material) {}
     private final long revision;
     private final LevelChunkSection section;
-    private final FrequencyMaterialSectionSnapshot snapshot;
     private final double sectionLoss;
     private final double[] regionLosses;
     private static final Object UNRESOLVED = new Object();
@@ -30,9 +29,8 @@ public final class FrequencyMaterialSectionCache {
     private volatile double[] twoBlockLosses;
     private ResourceLocation[] twoBlockMaterials;
 
-    private FrequencyMaterialSectionCache(LevelChunkSection section, FrequencyMaterialSectionSnapshot snapshot, long revision, double sectionLoss) {
+    private FrequencyMaterialSectionCache(LevelChunkSection section, long revision, double sectionLoss) {
         this.section = section;
-        this.snapshot = snapshot;
         this.revision = revision;
         this.sectionLoss = sectionLoss;
         this.regionLosses = Double.isNaN(sectionLoss) ? new double[64] : null;
@@ -66,40 +64,19 @@ public final class FrequencyMaterialSectionCache {
             return null;
         }
 
-        return new FrequencyMaterialSectionCache(section, null, FrequencyMaterialRules.revision(), mixed[0] ? Double.NaN : first[0]);
-    }
-
-    static FrequencyMaterialSectionCache create(FrequencyMaterialSectionSnapshot snapshot) {
-        double[] first = {-1.0};
-        boolean[] mixed = {false};
-
-        snapshot.forEachCell(cell -> {
-            double loss = cell.lossDbPerMeter();
-
-            if (first[0] < 0.0) {
-                first[0] = loss;
-            } else if (loss != first[0]) {
-                mixed[0] = true;
-            }
-        });
-
-        return new FrequencyMaterialSectionCache(null, snapshot, snapshot.revision(), mixed[0] ? Double.NaN : first[0]);
+        return new FrequencyMaterialSectionCache(section, FrequencyMaterialRules.revision(), mixed[0] ? Double.NaN : first[0]);
     }
 
     private double lossAt(int x, int y, int z) {
-        return snapshot != null ? snapshot.cell(x, y, z).lossDbPerMeter() : FrequencyMaterialRules.decibelsPerMeter(section.getBlockState(x, y, z));
+        return FrequencyMaterialRules.decibelsPerMeter(section.getBlockState(x, y, z));
     }
 
     private ResourceLocation materialAt(int x, int y, int z) {
-        return snapshot != null ? snapshot.cell(x, y, z).material() : FrequencyMaterialClassifier.classify(section.getBlockState(x, y, z));
+        return FrequencyMaterialClassifier.classify(section.getBlockState(x, y, z));
     }
 
     private void forEachDistinctMaterial(Consumer<ResourceLocation> consumer) {
-        if (snapshot != null) {
-            snapshot.forEachCell(cell -> consumer.accept(cell.material()));
-        } else {
-            section.getStates().getAll(state -> consumer.accept(FrequencyMaterialClassifier.classify(state)));
-        }
+        section.getStates().getAll(state -> consumer.accept(FrequencyMaterialClassifier.classify(state)));
     }
 
     public boolean current() {
@@ -240,11 +217,9 @@ public final class FrequencyMaterialSectionCache {
             int baseY = y & ~1;
             int baseZ = z & ~1;
 
-            FrequencyMaterialSectionSnapshot.Cell firstCell = snapshot == null ? null : snapshot.cell(baseX, baseY, baseZ);
-            BlockState firstState = snapshot == null ? section.getBlockState(baseX, baseY, baseZ) : null;
-
-            double loss = firstCell != null ? firstCell.lossDbPerMeter() : FrequencyMaterialRules.decibelsPerMeter(firstState);
-            ResourceLocation material = firstCell != null ? firstCell.material() : FrequencyMaterialClassifier.classify(firstState);
+            BlockState firstState = section.getBlockState(baseX, baseY, baseZ);
+            double loss = FrequencyMaterialRules.decibelsPerMeter(firstState);
+            ResourceLocation material = FrequencyMaterialClassifier.classify(firstState);
 
             boolean sameLoss = true;
             boolean sameMaterial = true;
@@ -263,18 +238,15 @@ public final class FrequencyMaterialSectionCache {
                         int bz = baseZ + dz;
                         reads++;
 
-                        FrequencyMaterialSectionSnapshot.Cell cell = snapshot == null ? null : snapshot.cell(bx, by, bz);
-                        BlockState state = snapshot == null ? section.getBlockState(bx, by, bz) : null;
-
-                        double currentLoss = cell != null ? cell.lossDbPerMeter() : FrequencyMaterialRules.decibelsPerMeter(state);
+                        BlockState state = section.getBlockState(bx, by, bz);
+                        double currentLoss = FrequencyMaterialRules.decibelsPerMeter(state);
                         if (currentLoss != loss) {
                             sameLoss = false;
                             break outer;
                         }
 
                         if (sameMaterial) {
-                            ResourceLocation currentMaterial = cell != null ? cell.material() : FrequencyMaterialClassifier.classify(state);
-
+                            ResourceLocation currentMaterial = FrequencyMaterialClassifier.classify(state);
                             if (!material.equals(currentMaterial)) {
                                 sameMaterial = false;
                             }

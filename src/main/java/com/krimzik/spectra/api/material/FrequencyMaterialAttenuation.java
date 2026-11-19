@@ -327,6 +327,7 @@ public final class FrequencyMaterialAttenuation {
         FrequencyMaterialWorldSnapshot.Chunk snapshotChunk = null;
         FrequencyMaterialSectionSnapshot snapshotSection = null;
         FrequencyMaterialSectionCache materialCache = null;
+        FrequencyMaterialSectionSnapshot.MaterialGrid materialGrid = null;
         boolean chunkAvailable = false;
 
         int cachedSectionY = Integer.MIN_VALUE;
@@ -367,6 +368,7 @@ public final class FrequencyMaterialAttenuation {
                 section = null;
                 snapshotSection = null;
                 materialCache = null;
+                materialGrid = null;
                 cachedSectionY = Integer.MIN_VALUE;
                 emptySection = false;
                 uniformSectionLoss = Double.NaN;
@@ -438,10 +440,18 @@ public final class FrequencyMaterialAttenuation {
                     section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
                     emptySection = skipAirSections && section != null && section.hasOnlyAir();
                     materialCache = !emptySection && section instanceof FrequencyMaterialSectionAccess access ? access.spectra$materialSummary() : null;
+
+                    snapshotSection = null;
+                    materialGrid = null;
                 } else {
                     snapshotSection = snapshotChunk.section(index);
                     emptySection = skipAirSections && snapshotChunk.onlyAir(index);
-                    materialCache = !emptySection && snapshotSection != null ? snapshotSection.summary() : null;
+                    materialCache = null;
+                    materialGrid = null;
+
+                    if (snapshotSection != null && (Double.isNaN(snapshotSection.sectionLoss()) || (consumer != null && snapshotSection.sectionMaterial() == null))) {
+                        materialGrid = snapshotSection.grid();
+                    }
                 }
 
                 uniformSectionLoss = emptySection ? airLoss : Double.NaN;
@@ -450,9 +460,9 @@ public final class FrequencyMaterialAttenuation {
                 }
 
                 if (t == 0.0 && (((int) Math.floor(endX)) >> 4) == chunkX && (((int) Math.floor(endY)) >> 4) == cachedSectionY && (((int) Math.floor(endZ)) >> 4) == chunkZ) {
-                    double sectionLoss = emptySection ? airLoss : materialCache == null ? Double.NaN : materialCache.sectionLoss();
+                    double sectionLoss = emptySection ? airLoss : world == null ? (materialCache == null ? Double.NaN : materialCache.sectionLoss()) : (snapshotSection == null ? Double.NaN : snapshotSection.sectionLoss());
                     if (Double.isFinite(sectionLoss)) {
-                        ResourceLocation material = consumer == null ? null : emptySection ? FrequencyMaterialClassifier.AIR : materialCache.sectionMaterial();
+                        ResourceLocation material = consumer == null ? null : emptySection ? FrequencyMaterialClassifier.AIR : world == null ? (materialCache == null ? null : materialCache.sectionMaterial()) : (snapshotSection == null ? null : snapshotSection.sectionMaterial());
                         if (consumer == null || material != null) {
                             if (stats != null) {
                                 stats.sameSectionPaths++;
@@ -485,49 +495,90 @@ public final class FrequencyMaterialAttenuation {
                 int shift = 4;
                 double regionLoss = uniformSectionLoss;
 
-                if (Double.isNaN(regionLoss) && materialCache != null) {
-                    regionLoss = materialCache.sectionLoss();
+                if (Double.isNaN(regionLoss)) {
+                    if (world != null && snapshotSection != null) {
+                        regionLoss = snapshotSection.sectionLoss();
+                    } else if (materialCache != null) {
+                        regionLoss = materialCache.sectionLoss();
+                    }
                 }
 
                 ResourceLocation regionMaterial = null;
                 if (consumer != null && regionLoss >= 0.0) {
                     if (emptySection) {
                         regionMaterial = FrequencyMaterialClassifier.AIR;
+                    } else if (world != null && snapshotSection != null) {
+                        regionMaterial = snapshotSection.sectionMaterial();
                     } else if (materialCache != null) {
                         regionMaterial = materialCache.sectionMaterial();
                     }
                 }
 
-                if (materialCache != null && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
-                    FrequencyMaterialSectionCache.Region8 large = materialCache.region8(x & 15, y & 15, z & 15);
+                if ((materialGrid != null || materialCache != null) && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
+                    if (materialGrid != null) {
+                        int id = materialGrid.region8Id(x & 15, y & 15, z & 15);
 
-                    if (large != null) {
-                        shift = 3;
-                        regionLoss = large.loss();
-                        regionMaterial = large.material();
+                        if (id >= 0) {
+                            FrequencyMaterialSectionSnapshot.Cell cell = materialGrid.paletteCell(id);
+                            shift = 3;
+                            regionLoss = cell.lossDbPerMeter();
+                            regionMaterial = cell.material();
+                        } else {
+                            shift = 2;
+                            id = materialGrid.region4Id(x & 15, y & 15, z & 15);
+
+                            if (id >= 0) {
+                                FrequencyMaterialSectionSnapshot.Cell cell = materialGrid.paletteCell(id);
+                                regionLoss = cell.lossDbPerMeter();
+                                regionMaterial = cell.material();
+                            } else {
+                                regionLoss = Double.NaN;
+                                regionMaterial = null;
+                            }
+                        }
                     } else {
-                        shift = 2;
-                        regionLoss = materialCache.regionLoss(x & 15, y & 15, z & 15);
+                        FrequencyMaterialSectionCache.Region8 large = materialCache.region8(x & 15, y & 15, z & 15);
+                        if (large != null) {
+                            shift = 3;
+                            regionLoss = large.loss();
+                            regionMaterial = large.material();
+                        } else {
+                            shift = 2;
+                            regionLoss = materialCache.regionLoss(x & 15, y & 15, z & 15);
 
-                        if (consumer != null && regionLoss >= 0.0) {
-                            regionMaterial = materialCache.regionMaterial(x & 15, y & 15, z & 15);
+                            if (consumer != null && regionLoss >= 0.0) {
+                                regionMaterial = materialCache.regionMaterial(x & 15, y & 15, z & 15);
+                            }
                         }
                     }
                 }
 
-                if (materialCache != null && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
+                if ((materialGrid != null || materialCache != null) && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
                     if (stats != null) {
                         stats.twoBlockChecks++;
                     }
 
-                    double smallerLoss = materialCache.twoBlockLoss(x & 15, y & 15, z & 15, stats);
-                    if (smallerLoss >= 0.0) {
-                        ResourceLocation smallerMaterial = consumer == null ? null : materialCache.twoBlockMaterial(x & 15, y & 15, z & 15);
+                    if (materialGrid != null) {
+                        int id = materialGrid.region2Id(x & 15, y & 15, z & 15);
 
-                        if (consumer == null || smallerMaterial != null) {
+                        if (id >= 0) {
+                            FrequencyMaterialSectionSnapshot.Cell cell = materialGrid.paletteCell(id);
+
                             shift = 1;
-                            regionLoss = smallerLoss;
-                            regionMaterial = smallerMaterial;
+                            regionLoss = cell.lossDbPerMeter();
+                            regionMaterial = cell.material();
+                        }
+                    } else {
+                        double smallerLoss = materialCache.twoBlockLoss(x & 15, y & 15, z & 15, stats);
+
+                        if (smallerLoss >= 0.0) {
+                            ResourceLocation smallerMaterial = consumer == null ? null : materialCache.twoBlockMaterial(x & 15, y & 15, z & 15);
+
+                            if (consumer == null || smallerMaterial != null) {
+                                shift = 1;
+                                regionLoss = smallerLoss;
+                                regionMaterial = smallerMaterial;
+                            }
                         }
                     }
                 }

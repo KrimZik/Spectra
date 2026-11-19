@@ -513,4 +513,98 @@ class FrequencyMaterialSnapshotTraversalTest {
 
         assertEquals(FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, mixedStart, mixedEnd, discard), mixed.factor(), 1.0e-12);
     }
+
+    @Test
+    void compactGridPreservesEqualLossMaterialBoundaries() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:glass"), 3.0)));
+        PalettedContainer<BlockState> states = states();
+
+        for (int y = 0; y < 8; y++) {
+            for (int z = 0; z < 8; z++) {
+                for (int x = 0; x < 8; x++) {
+                    states.set(x, y, z, Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+
+        states.set(1, 1, 1, Blocks.GLASS.defaultBlockState());
+
+        FrequencyMaterialSectionSnapshot snapshot = FrequencyMaterialSectionSnapshot.capture(mockSection(states));
+
+        var grid = snapshot.grid();
+
+        assertEquals(-1, grid.region2Id(1, 1, 1));
+        assertEquals(FrequencyMaterialClassifier.STONE, grid.paletteCell(grid.region2Id(3, 1, 1)).material());
+        assertEquals(-1, grid.region4Id(1, 1, 1));
+        assertEquals(-1, grid.region8Id(1, 1, 1));
+
+        assertEquals(FrequencyMaterialClassifier.STONE, grid.paletteCell(grid.region4Id(5, 1, 1)).material());
+        assertEquals(FrequencyMaterialClassifier.AIR, grid.paletteCell(grid.region8Id(9, 1, 1)).material());
+
+        assertEquals(3.0, grid.cell(1, 1, 1).lossDbPerMeter(), 0.0);
+        assertNotEquals(grid.cell(0, 1, 1).material(), grid.cell(1, 1, 1).material());
+    }
+
+    @Test
+    void compactGridIsSharedSafelyAcrossWorkers() throws Exception {
+        PalettedContainer<BlockState> states = states();
+        states.set(1, 0, 0, Blocks.STONE.defaultBlockState());
+
+        FrequencyMaterialSectionSnapshot snapshot = FrequencyMaterialSectionSnapshot.capture(mockSection(states));
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+
+        try {
+            List<CompletableFuture<FrequencyMaterialSectionSnapshot.MaterialGrid>> tasks = new ArrayList<>();
+
+            for (int i = 0; i < 64; i++) {
+                tasks.add(CompletableFuture.supplyAsync(snapshot::grid, executor));
+            }
+
+            var first = tasks.getFirst().get();
+
+            for (var task : tasks) {
+                assertSame(first, task.get());
+            }
+
+            assertEquals(FrequencyMaterialClassifier.STONE, first.cell(1, 0, 0).material());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void compactGridMatchesLiveMixedMaterialPropagation() throws Exception {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:glass"), 3.0)));
+        PalettedContainer<BlockState> states = states();
+
+        for (int y = 0; y < 8; y++) {
+            for (int z = 0; z < 8; z++) {
+                for (int x = 0; x < 8; x++) {
+                    states.set(x, y, z, Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+
+        states.set(1, 1, 1, Blocks.GLASS.defaultBlockState());
+        chunk(0, 0, states);
+
+        assertSnapshotMatchesLive(new Vec3(0.5, 65.5, 1.5), new Vec3(9.5, 65.5, 1.5), 22.5);
+    }
+
+    @Test
+    void equalLossSectionStillPreservesMaterialBoundaries() throws Exception {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(ResourceLocation.parse("minecraft:glass"), 3.0)));
+        PalettedContainer<BlockState> states = new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, Blocks.STONE.defaultBlockState(), PalettedContainer.Strategy.SECTION_STATES);
+
+        states.set(1, 0, 0, Blocks.GLASS.defaultBlockState());
+
+        FrequencyMaterialSectionSnapshot snapshot = FrequencyMaterialSectionSnapshot.capture(mockSection(states));
+
+        assertEquals(3.0, snapshot.sectionLoss(), 0.0);
+        assertNull(snapshot.sectionMaterial());
+
+        chunk(0, 0, states);
+
+        assertSnapshotMatchesLive(new Vec3(0.5, 64.5, 0.5), new Vec3(2.5, 64.5, 0.5), 6.0);
+    }
 }
