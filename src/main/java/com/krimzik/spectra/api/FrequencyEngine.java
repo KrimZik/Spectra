@@ -92,7 +92,7 @@ public final class FrequencyEngine {
     private static final int MIN_PARALLEL_RECEPTION = 1024;
     private static final int MAX_GROUP_ITEMS = 8192;
     private static final int MAX_GROUP_RECEIVERS = 64;
-    private static final int MAX_IN_FLIGHT_RECEPTION = 2;
+    private static final int MAX_IN_FLIGHT_RECEPTION = 4;
     private static final int MAX_QUEUED_RECEPTION = 16384;
     private static final int MAX_RECEPTION_RETRIES = 2;
     private static final long RECEPTION_TICK_BUDGET_NS = 2_000_000L;
@@ -106,9 +106,12 @@ public final class FrequencyEngine {
     private final ArrayDeque<ReceptionRequest> syncReception = new ArrayDeque<>();
     private final ArrayDeque<SharedReceptionBatch> activeReception = new ArrayDeque<>();
     private int submittedReceptionBatches;
+    private int peakInFlightReceptionBatches;
     private int adaptiveSyncRequests;
     private long receptionPrepareNanos;
     private long receptionSnapshotNanos;
+    private long receptionSnapshotPathsNanos;
+    private long receptionSnapshotWorldNanos;
     private long receptionValidationNanos;
     private long receptionMaterialValidationNanos;
     private long receptionEmitterValidationNanos;
@@ -121,6 +124,18 @@ public final class FrequencyEngine {
     private final long[] receptionActiveTickNanos = new long[256];
     private int receptionActiveTickCount;
     private long receptionMaxTickNanos;
+
+    private int receptionHeadBlockedTicks;
+    private int receptionReadyBehindHeadTicks;
+    private int receptionPeakReadyBehindHead;
+    private int receptionOverBudgetTicks;
+
+    private long receptionWorstTickPrepareNanos;
+    private long receptionWorstTickSnapshotNanos;
+    private long receptionWorstTickValidationNanos;
+    private long receptionWorstTickDeliveryNanos;
+    private long receptionWorstTickSyncNanos;
+    private long receptionWorstTickOtherNanos;
 
     private record ParallelCandidate(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position, double distanceSquared) {}
     private record ReceptionRequest(FrequencyReceiver receiver, ReceiverRegistration registration, double range, FrequencyReceptionConsumer consumer, int retries) {}
@@ -1691,6 +1706,11 @@ public final class FrequencyEngine {
         return activeReception.size();
     }
 
+    int peakInFlightReceptionBatchCount() {
+        checkRunning();
+        return peakInFlightReceptionBatches;
+    }
+
     private PreparedReception prepareReception(ReceptionRequest request) {
         long started = System.nanoTime();
         try {
@@ -1816,10 +1836,11 @@ public final class FrequencyEngine {
             }
 
             List<FrequencySableReceptionSnapshot> snapshots;
+            FrequencySableReceptionSnapshot.CaptureTimings captureTimings = new FrequencySableReceptionSnapshot.CaptureTimings();
             long snapshotStart = System.nanoTime();
 
             try {
-                snapshots = FrequencySableReceptionSnapshot.captureBatch(level, inputs);
+                snapshots = FrequencySableReceptionSnapshot.captureBatch(level, inputs, captureTimings);
             } catch (IllegalArgumentException | IllegalStateException exception) {
                 LOGGER.warn("Shared reception snapshot unavailable: {}", exception.toString());
 
@@ -1832,6 +1853,8 @@ public final class FrequencyEngine {
                 continue;
             } finally {
                 receptionSnapshotNanos += System.nanoTime() - snapshotStart;
+                receptionSnapshotPathsNanos += captureTimings.pathsNanos();
+                receptionSnapshotWorldNanos += captureTimings.worldNanos();
             }
 
             List<PreparedReception> group = List.copyOf(selected);
@@ -1872,6 +1895,7 @@ public final class FrequencyEngine {
             }
 
             activeReception.addLast(new SharedReceptionBatch(group, snapshots, offsets, job));
+            peakInFlightReceptionBatches = Math.max(peakInFlightReceptionBatches, activeReception.size());
 
             submittedReceptionBatches++;
             lastReceptionDecision = "worker_batch";
@@ -1967,11 +1991,32 @@ public final class FrequencyEngine {
         boolean hadWork = pendingReceptionBatchCount() != 0;
         long deadline = tickStart + RECEPTION_TICK_BUDGET_NS;
 
+        long prepareBefore = receptionPrepareNanos;
+        long snapshotBefore = receptionSnapshotNanos;
+        long validationBefore = receptionValidationNanos;
+        long deliveryBefore = receptionDeliveryNanos;
+        long syncBefore = receptionSyncNanos;
+
         try {
             while (!activeReception.isEmpty() && System.nanoTime() < deadline) {
                 SharedReceptionBatch batch = activeReception.peekFirst();
 
                 if (!batch.job.complete()) {
+                    receptionHeadBlockedTicks++;
+
+                    int readyBehind = 0;
+
+                    for (SharedReceptionBatch later : activeReception) {
+                        if (later != batch && later.job.complete()) {
+                            readyBehind++;
+                        }
+                    }
+
+                    if (readyBehind > 0) {
+                        receptionReadyBehindHeadTicks++;
+                        receptionPeakReadyBehindHead = Math.max(receptionPeakReadyBehindHead, readyBehind);
+                    }
+
                     break;
                 }
 
@@ -2079,12 +2124,29 @@ public final class FrequencyEngine {
                 long elapsed = System.nanoTime() - tickStart;
 
                 receptionActiveTickNanos[receptionActiveTickCount++ % receptionActiveTickNanos.length] = elapsed;
-                receptionMaxTickNanos = Math.max(receptionMaxTickNanos, elapsed);
+
+                if (elapsed > RECEPTION_TICK_BUDGET_NS) {
+                    receptionOverBudgetTicks++;
+                }
+
+                if (elapsed > receptionMaxTickNanos) {
+                    receptionMaxTickNanos = elapsed;
+
+                    receptionWorstTickPrepareNanos = receptionPrepareNanos - prepareBefore;
+                    receptionWorstTickSnapshotNanos = receptionSnapshotNanos - snapshotBefore;
+                    receptionWorstTickValidationNanos = receptionValidationNanos - validationBefore;
+                    receptionWorstTickDeliveryNanos = receptionDeliveryNanos - deliveryBefore;
+                    receptionWorstTickSyncNanos = receptionSyncNanos - syncBefore;
+
+                    long measured = receptionWorstTickPrepareNanos + receptionWorstTickSnapshotNanos + receptionWorstTickValidationNanos + receptionWorstTickDeliveryNanos + receptionWorstTickSyncNanos;
+
+                    receptionWorstTickOtherNanos = Math.max(0L, elapsed - measured);
+                }
             }
         }
     }
 
-    record ReceptionTimings(double prepareMs, double snapshotMs, double validationMs, double deliveryMs, double synchronousMs, double workerThreadRunMs, double p95ActiveTickMs, double maxActiveTickMs, int activeTicks, int adaptiveSyncRequests, double materialValidationMs, double emitterValidationMs) {}
+    record ReceptionTimings(double prepareMs, double snapshotMs, double validationMs, double deliveryMs, double synchronousMs, double workerThreadRunMs, double p95ActiveTickMs, double maxActiveTickMs, int activeTicks, int adaptiveSyncRequests, double materialValidationMs, double emitterValidationMs, double snapshotPathsMs, double snapshotWorldMs) {}
 
     ReceptionTimings receptionTimings() {
         checkRunning();
@@ -2094,7 +2156,14 @@ public final class FrequencyEngine {
         Arrays.sort(sorted);
         long p95 = size == 0 ? 0L : sorted[(int) Math.ceil(size * 0.95) - 1];
 
-        return new ReceptionTimings(receptionPrepareNanos * 1.0e-6, receptionSnapshotNanos * 1.0e-6, receptionValidationNanos * 1.0e-6, receptionDeliveryNanos * 1.0e-6, receptionSyncNanos * 1.0e-6, receptionWorkerNanos * 1.0e-6, p95 * 1.0e-6, receptionMaxTickNanos * 1.0e-6, size, adaptiveSyncRequests, receptionMaterialValidationNanos * 1.0e-6, receptionEmitterValidationNanos * 1.0e-6);
+        return new ReceptionTimings(receptionPrepareNanos * 1.0e-6, receptionSnapshotNanos * 1.0e-6, receptionValidationNanos * 1.0e-6, receptionDeliveryNanos * 1.0e-6, receptionSyncNanos * 1.0e-6, receptionWorkerNanos * 1.0e-6, p95 * 1.0e-6, receptionMaxTickNanos * 1.0e-6, size, adaptiveSyncRequests, receptionMaterialValidationNanos * 1.0e-6, receptionEmitterValidationNanos * 1.0e-6, receptionSnapshotPathsNanos * 1.0e-6, receptionSnapshotWorldNanos * 1.0e-6);
+    }
+
+    record ReceptionSchedulerDiagnostics(int headBlockedTicks, int readyBehindHeadTicks, int peakReadyBehindHead, int overBudgetTicks, double worstTickPrepareMs, double worstTickSnapshotMs, double worstTickValidationMs, double worstTickDeliveryMs, double worstTickSyncMs, double worstTickOtherMs) {}
+    ReceptionSchedulerDiagnostics receptionSchedulerDiagnostics() {
+        checkRunning();
+
+        return new ReceptionSchedulerDiagnostics(receptionHeadBlockedTicks, receptionReadyBehindHeadTicks, receptionPeakReadyBehindHead, receptionOverBudgetTicks, receptionWorstTickPrepareNanos * 1.0e-6, receptionWorstTickSnapshotNanos * 1.0e-6, receptionWorstTickValidationNanos * 1.0e-6, receptionWorstTickDeliveryNanos * 1.0e-6, receptionWorstTickSyncNanos * 1.0e-6, receptionWorstTickOtherNanos * 1.0e-6);
     }
 
     void shutdown() {

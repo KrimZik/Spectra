@@ -17,6 +17,19 @@ import java.util.List;
 import java.util.Objects;
 
 public final class FrequencySableReceptionSnapshot {
+    public static final class CaptureTimings {
+        private long pathsNanos;
+        private long worldNanos;
+
+        public long pathsNanos() {
+            return pathsNanos;
+        }
+
+        public long worldNanos() {
+            return worldNanos;
+        }
+    }
+
     private static final class Coverage {
         private double minX = Double.POSITIVE_INFINITY;
         private double minY = Double.POSITIVE_INFINITY;
@@ -35,6 +48,15 @@ public final class FrequencySableReceptionSnapshot {
             maxZ = Math.max(maxZ, Math.max(start.z, end.z));
         }
 
+        void include(Vec3 point) {
+            minX = Math.min(minX, point.x);
+            minY = Math.min(minY, point.y);
+            minZ = Math.min(minZ, point.z);
+            maxX = Math.max(maxX, point.x);
+            maxY = Math.max(maxY, point.y);
+            maxZ = Math.max(maxZ, point.z);
+        }
+
         void capture(FrequencyMaterialWorldSnapshot.Builder builder) {
             if (minX != Double.POSITIVE_INFINITY) {
                 builder.includePath(new Vec3(minX, minY, minZ), new Vec3(maxX, maxY, maxZ));
@@ -50,7 +72,7 @@ public final class FrequencySableReceptionSnapshot {
         }
     }
 
-    private record CapturedPaths(Vec3 receiver, List<Ship> ships, List<Path> paths) {}
+    private record CapturedPaths(Vec3 receiver, List<Ship> ships, List<Path> paths, List<Vec3> emitters) {}
 
     private record Ship(SubLevelAccess source, Pose3d pose, BoundingBox3d bounds) {
         boolean current() {
@@ -91,12 +113,14 @@ public final class FrequencySableReceptionSnapshot {
     private final Vec3 receiver;
     private final List<Ship> ships;
     private final List<Path> paths;
+    private final List<Vec3> emitters;
 
-    private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<Path> paths) {
+    private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<Path> paths, List<Vec3> emitters) {
         this.world = world;
         this.receiver = receiver;
         this.ships = List.copyOf(ships);
         this.paths = List.copyOf(paths);
+        this.emitters = emitters;
     }
 
     public static FrequencySableReceptionSnapshot capture(ServerLevel level, Vec3 receiver, List<Vec3> emitters, List<? extends SubLevelAccess> candidates) {
@@ -104,6 +128,10 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     public static List<FrequencySableReceptionSnapshot> captureBatch(ServerLevel level, List<BatchInput> inputs) {
+        return captureBatch(level, inputs, null);
+    }
+
+    public static List<FrequencySableReceptionSnapshot> captureBatch(ServerLevel level, List<BatchInput> inputs, CaptureTimings timings) {
         Objects.requireNonNull(level);
         Objects.requireNonNull(inputs);
 
@@ -115,6 +143,7 @@ public final class FrequencySableReceptionSnapshot {
             return List.of();
         }
 
+        long pathsStart = timings == null ? 0L : System.nanoTime();
         Coverage worldCoverage = new Coverage();
         IdentityHashMap<Ship, Coverage> shipCoverage = new IdentityHashMap<>();
         IdentityHashMap<SubLevelAccess, Ship> copiedShips = new IdentityHashMap<>();
@@ -123,6 +152,10 @@ public final class FrequencySableReceptionSnapshot {
 
         for (BatchInput input : inputs) {
             Vec3 receiver = input.receiver();
+            if (!input.emitters().isEmpty()) {
+                worldCoverage.include(receiver);
+            }
+
             List<Ship> ships = new ArrayList<>(input.candidates().size());
 
             for (SubLevelAccess source : input.candidates()) {
@@ -136,10 +169,13 @@ public final class FrequencySableReceptionSnapshot {
                 ships.add(ship);
             }
 
-            List<Path> paths = new ArrayList<>(input.emitters().size());
+            List<Path> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
 
             for (Vec3 start : input.emitters()) {
-                worldCoverage.include(start, receiver);
+                worldCoverage.include(start);
+                if (ships.isEmpty()) {
+                    continue;
+                }
 
                 double dx = receiver.x - start.x;
                 double dy = receiver.y - start.y;
@@ -178,8 +214,14 @@ public final class FrequencySableReceptionSnapshot {
                 paths.add(new Path(start, spans == null ? List.of() : List.copyOf(spans)));
             }
 
-            captured.add(new CapturedPaths(receiver, List.copyOf(ships), List.copyOf(paths)));
+            captured.add(new CapturedPaths(receiver, List.copyOf(ships), List.copyOf(paths), input.emitters()));
         }
+
+        if (timings != null) {
+            timings.pathsNanos += System.nanoTime() - pathsStart;
+        }
+
+        long worldStart = timings == null ? 0L : System.nanoTime();
 
         FrequencyMaterialWorldSnapshot.Builder builder = FrequencyMaterialWorldSnapshot.builder(level);
 
@@ -192,6 +234,11 @@ public final class FrequencySableReceptionSnapshot {
             builder = FrequencyMaterialWorldSnapshot.builder(level);
 
             for (CapturedPaths entry : captured) {
+                if (entry.paths().isEmpty()) {
+                    for (Vec3 start : entry.emitters()) {
+                        builder.includePath(start, entry.receiver());
+                    }
+                }
                 for (Path path : entry.paths()) {
                     builder.includePath(path.start(), entry.receiver());
 
@@ -204,15 +251,24 @@ public final class FrequencySableReceptionSnapshot {
 
         FrequencyMaterialWorldSnapshot world = builder.build();
 
+        if (timings != null) {
+            timings.worldNanos += System.nanoTime() - worldStart;
+        }
+
         List<FrequencySableReceptionSnapshot> results = new ArrayList<>(captured.size());
         for (CapturedPaths entry : captured) {
-            results.add(new FrequencySableReceptionSnapshot(world, entry.receiver(), entry.ships(), entry.paths()));
+            results.add(new FrequencySableReceptionSnapshot(world, entry.receiver(), entry.ships(), entry.paths(), entry.emitters()));
         }
 
         return List.copyOf(results);
     }
 
     public double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
+        if (paths.isEmpty()) {
+            Vec3 start = emitters.get(index);
+            return reflection ? wave.factorSnapshot(world, start, receiver, frequencyHz) : FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
+        }
+
         Path path = paths.get(index);
         if (path.ships().isEmpty()) {
             return reflection ? wave.factorSnapshot(world, path.start(), receiver, frequencyHz) : FrequencyMaterialAttenuation.factorSnapshot(world, path.start(), receiver);

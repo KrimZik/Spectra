@@ -231,11 +231,19 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
 
         assertTrue(engine.submittedReceptionBatchCount() > 0);
         assertTrue(engine.submittedReceptionBatchCount() < 32);
+        assertTrue(engine.peakInFlightReceptionBatchCount() <= 4);
 
         FrequencyEngine.ReceptionTimings timings = engine.receptionTimings();
 
         assertEquals(0, timings.adaptiveSyncRequests());
         assertTrue(timings.activeTicks() > 0);
         assertTrue(timings.maxActiveTickMs() >= timings.p95ActiveTickMs());
+
+        FrequencyEngine.ReceptionSchedulerDiagnostics scheduler = engine.receptionSchedulerDiagnostics();
+
+        assertTrue(scheduler.readyBehindHeadTicks() <= scheduler.headBlockedTicks());
+        assertTrue(scheduler.peakReadyBehindHead() <= 3);
+        assertTrue(scheduler.overBudgetTicks() <= timings.activeTicks());
+        assertTrue(scheduler.worstTickOtherMs() >= 0.0);
     }
 }

@@ -570,10 +570,15 @@ public final class SpectraProfileCommand {
             double wallMs = (System.nanoTime() - profile.startedNanos) / 1_000_000.0;
 
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] THREADED_RECEPTION status=%s emitters=%d receivers=%d threads=%d queued=%d immediateCallbacks=%d expectedCallbacks=%d actualCallbacks=%d offThread=%s syncMs=%.3f submitMainMs=%.3f completionMainMs=%.3f totalMainMs=%.3f wallMs=%.3f syncAllocated=%d B submitAllocated=%d B", timedOut ? "TIMEOUT" : "COMPLETE", profile.emitters, profile.receivers, FrequencyMaterialConfig.workerThreads(), profile.queued, profile.immediateCallbacks, profile.baselineCallbacks, profile.callbacks, profile.offThread, syncMs, submitMs, completionMs, mainMs, wallMs, profile.syncAllocated, profile.submitAllocated));
-            LOGGER.info("[SPECTRA-PROFILE] SHARED_RECEPTION submittedBatches={} inFlightBatches={} outstandingRequests={}", profile.engine.submittedReceptionBatchCount(), profile.engine.inFlightReceptionBatchCount(), profile.engine.pendingReceptionBatchCount());
+            LOGGER.info("[SPECTRA-PROFILE] SHARED_RECEPTION submittedBatches={} inFlightBatches={} peakInFlightBatches={} outstandingRequests={}", profile.engine.submittedReceptionBatchCount(), profile.engine.inFlightReceptionBatchCount(), profile.engine.peakInFlightReceptionBatchCount(), profile.engine.pendingReceptionBatchCount());
 
             var stages = profile.engine.receptionTimings();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_STAGES prepareMs=%.3f snapshotMs=%.3f validationMs=%.3f deliveryMs=%.3f synchronousMs=%.3f workerThreadRunMs=%.3f p95ActiveTickMs=%.3f maxActiveTickMs=%.3f activeTicks=%d adaptiveSyncRequests=%d materialValidationMs=%.3f emitterValidationMs=%.3f", stages.prepareMs(), stages.snapshotMs(), stages.validationMs(), stages.deliveryMs(), stages.synchronousMs(), stages.workerThreadRunMs(), stages.p95ActiveTickMs(), stages.maxActiveTickMs(), stages.activeTicks(), stages.adaptiveSyncRequests(), stages.materialValidationMs(), stages.emitterValidationMs()));
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] SNAPSHOT_CAPTURE pathsMs=%.3f worldMs=%.3f otherMs=%.3f", stages.snapshotPathsMs(), stages.snapshotWorldMs(), Math.max(0.0, stages.snapshotMs() - stages.snapshotPathsMs() - stages.snapshotWorldMs())));
+
+            var scheduler = profile.engine.receptionSchedulerDiagnostics();
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_SCHEDULER headBlockedTicks=%d readyBehindHeadTicks=%d peakReadyBehindHead=%d overBudgetTicks=%d worstTickPrepareMs=%.3f worstTickSnapshotMs=%.3f worstTickValidationMs=%.3f worstTickDeliveryMs=%.3f worstTickSyncMs=%.3f worstTickOtherMs=%.3f", scheduler.headBlockedTicks(), scheduler.readyBehindHeadTicks(), scheduler.peakReadyBehindHead(), scheduler.overBudgetTicks(), scheduler.worstTickPrepareMs(), scheduler.worstTickSnapshotMs(), scheduler.worstTickValidationMs(), scheduler.worstTickDeliveryMs(), scheduler.worstTickSyncMs(), scheduler.worstTickOtherMs()));
 
             if (timedOut || profile.callbacks != profile.baselineCallbacks || profile.offThread) {
                 LOGGER.warn("[SPECTRA-PROFILE] Threaded reception did not match the synchronous callback count or thread requirements");
