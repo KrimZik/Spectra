@@ -83,10 +83,19 @@ public final class FrequencyMaterialAttenuation {
         long uniformSections;
         long uniformRegions;
         long blockReads;
+        long sameSectionPaths;
+        long steps;
+        long regionChecks;
+        long regionFallbacks;
+        long materialSegments;
+        long twoBlockChecks;
+        long twoBlockSkips;
+        long twoBlockBuilds;
+        long twoBlockBuildReads;
 
         @Override
         public String toString() {
-            return "paths=" + paths + " unloadedChunks=" + unloadedChunks + " sections=" + sections + " uniformSections=" + uniformSections + " uniformRegions=" + uniformRegions + " blockReads=" + blockReads;
+            return "paths=" + paths + " unloadedChunks=" + unloadedChunks + " sections=" + sections + " uniformSections=" + uniformSections + " uniformRegions=" + uniformRegions + " blockReads=" + blockReads + " sameSectionPaths=" + sameSectionPaths + " steps=" + steps + " regionChecks=" + regionChecks + " regionFallbacks=" + regionFallbacks + " materialSegments=" + materialSegments + " twoBlockChecks=" + twoBlockChecks + " twoBlockSkips=" + twoBlockSkips + " twoBlockBuilds=" + twoBlockBuilds + " twoBlockBuildReads=" + twoBlockBuildReads;
         }
     }
 
@@ -238,6 +247,10 @@ public final class FrequencyMaterialAttenuation {
         BlockPos.MutableBlockPos pos = null;
 
         while (t < 1.0) {
+            if (stats != null) {
+                stats.steps++;
+            }
+
             int chunkX = x >> 4;
             int chunkZ = z >> 4;
 
@@ -315,7 +328,6 @@ public final class FrequencyMaterialAttenuation {
 
                 cachedSectionY = y >> 4;
                 int index = cachedSectionY - (minY >> 4);
-
                 section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
                 emptySection = skipAirSections && section != null && section.hasOnlyAir();
                 uniformSectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : Double.NaN;
@@ -329,7 +341,15 @@ public final class FrequencyMaterialAttenuation {
                     if (Double.isFinite(sectionLoss)) {
                         ResourceLocation material = consumer == null ? null : emptySection ? FrequencyMaterialClassifier.AIR : materialCache.sectionMaterial();
                         if (consumer == null || material != null) {
+                            if (stats != null) {
+                                stats.sameSectionPaths++;
+                            }
+
                             if (consumer != null) {
+                                if (stats != null) {
+                                    stats.materialSegments++;
+                                }
+
                                 consumer.acceptWithLoss(material, 0.0, 1.0, 0, sectionLoss);
                             }
 
@@ -345,6 +365,10 @@ public final class FrequencyMaterialAttenuation {
             }
 
             if (y >= minY && y < maxY) {
+                if (stats != null) {
+                    stats.regionChecks++;
+                }
+
                 int shift = 4;
                 double regionLoss = uniformSectionLoss;
 
@@ -371,6 +395,19 @@ public final class FrequencyMaterialAttenuation {
                     }
                 }
 
+                if (materialCache != null && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
+                    if (stats != null) {
+                        stats.twoBlockChecks++;
+                    }
+
+                    FrequencyMaterialSectionCache.TwoBlockRegion smaller = materialCache.twoBlockRegion(x & 15, y & 15, z & 15, stats);
+                    if (smaller != null && smaller.lossDbPerMeter() >= 0.0 && (consumer == null || smaller.material() != null)) {
+                        shift = 1;
+                        regionLoss = smaller.lossDbPerMeter();
+                        regionMaterial = smaller.material();
+                    }
+                }
+
                 if (regionLoss >= 0.0 && (consumer == null || regionMaterial != null)) {
                     int regionX = x >> shift;
                     int regionY = y >> shift;
@@ -385,14 +422,20 @@ public final class FrequencyMaterialAttenuation {
                         if (stats != null) {
                             if (shift == 4) {
                                 stats.uniformSections++;
-                            } else {
+                            } else if (shift == 2) {
                                 stats.uniformRegions++;
+                            } else {
+                                stats.twoBlockSkips++;
                             }
                         }
 
                         loss = MaterialAttenuationMath.accumulateLoss(loss, regionLoss - airBaseline, distance * (exit - t));
 
                         if (consumer != null) {
+                            if (stats != null) {
+                                stats.materialSegments++;
+                            }
+
                             consumer.acceptWithLoss(regionMaterial, t, exit, enteredAxes, regionLoss);
                         }
 
@@ -435,6 +478,10 @@ public final class FrequencyMaterialAttenuation {
                 }
             }
 
+            if (stats != null && y >= minY && y < maxY) {
+                stats.regionFallbacks++;
+            }
+
             double tx = sx > 0 ? boundaryTime(x + 1.0 - startX, dx, inverseX) : sx < 0 ? boundaryTime(x - startX, dx, inverseX) : Double.POSITIVE_INFINITY;
             double ty = sy > 0 ? boundaryTime(y + 1.0 - startY, dy, inverseY) : sy < 0 ? boundaryTime(y - startY, dy, inverseY) : Double.POSITIVE_INFINITY;
             double tz = sz > 0 ? boundaryTime(z + 1.0 - startZ, dz, inverseZ) : sz < 0 ? boundaryTime(z - startZ, dz, inverseZ) : Double.POSITIVE_INFINITY;
@@ -450,6 +497,9 @@ public final class FrequencyMaterialAttenuation {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
 
                     if (consumer != null) {
+                        if (stats != null) {
+                            stats.materialSegments++;
+                        }
                         consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, FrequencyMaterialRules.airLossDbPerMeter());
                     }
                 } else {
@@ -474,6 +524,9 @@ public final class FrequencyMaterialAttenuation {
                     loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
 
                     if (consumer != null) {
+                        if (stats != null) {
+                            stats.materialSegments++;
+                        }
                         consumer.acceptWithLoss(FrequencyMaterialClassifier.classify(state), t, next, enteredAxes, lossPerMeter);
                     }
                 }

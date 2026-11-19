@@ -1,6 +1,7 @@
 package com.krimzik.spectra.api.material;
 
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 
@@ -15,6 +16,9 @@ public final class FrequencyMaterialSectionCache {
     private static final Object MIXED = new Object();
     private volatile Object uniformMaterial = UNRESOLVED;
     private volatile Object[] regionMaterials;
+    private volatile TwoBlockRegion[][] twoBlockRegions;
+
+    record TwoBlockRegion(double lossDbPerMeter, ResourceLocation material) {}
 
     private FrequencyMaterialSectionCache(LevelChunkSection section, long revision, double sectionLoss) {
         this.section = section;
@@ -96,6 +100,84 @@ public final class FrequencyMaterialSectionCache {
 
         regionLosses[index] = loss;
         return loss;
+    }
+
+    TwoBlockRegion twoBlockRegion(int x, int y, int z, FrequencyMaterialAttenuation.TraversalStats stats) {
+        int parent = ((y >> 2) << 4) | ((z >> 2) << 2) | (x >> 2);
+        int child = (((y >> 1) & 1) << 2) | (((z >> 1) & 1) << 1) | ((x >> 1) & 1);
+
+        TwoBlockRegion[][] groups = twoBlockRegions;
+        if (groups != null) {
+            TwoBlockRegion[] cells = groups[parent];
+            if (cells != null) {
+                TwoBlockRegion cached = cells[child];
+                if (cached != null) {
+                    return cached;
+                }
+            }
+        }
+
+        synchronized (this) {
+            if (twoBlockRegions == null) {
+                twoBlockRegions = new TwoBlockRegion[64][];
+            }
+
+            TwoBlockRegion[] cells = twoBlockRegions[parent];
+            if (cells == null) {
+                cells = new TwoBlockRegion[8];
+                twoBlockRegions[parent] = cells;
+            }
+
+            TwoBlockRegion cached = cells[child];
+            if (cached != null) {
+                return cached;
+            }
+
+            int baseX = x & ~1;
+            int baseY = y & ~1;
+            int baseZ = z & ~1;
+
+            BlockState first = section.getBlockState(baseX, baseY, baseZ);
+            double loss = FrequencyMaterialRules.decibelsPerMeter(first);
+            ResourceLocation material = FrequencyMaterialClassifier.classify(first);
+
+            boolean sameLoss = true;
+            boolean sameMaterial = true;
+            int reads = 1;
+
+            outer:
+            for (int dy = 0; dy < 2; dy++) {
+                for (int dz = 0; dz < 2; dz++) {
+                    for (int dx = 0; dx < 2; dx++) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+
+                        BlockState state = section.getBlockState(baseX + dx, baseY + dy, baseZ + dz);
+                        reads++;
+
+                        if (FrequencyMaterialRules.decibelsPerMeter(state) != loss) {
+                            sameLoss = false;
+                            break outer;
+                        }
+
+                        if (sameMaterial && !FrequencyMaterialClassifier.classify(state).equals(material)) {
+                            sameMaterial = false;
+                        }
+                    }
+                }
+            }
+
+            cached = new TwoBlockRegion(sameLoss ? loss : Double.NaN, sameLoss && sameMaterial ? material : null);
+            cells[child] = cached;
+
+            if (stats != null) {
+                stats.twoBlockBuilds++;
+                stats.twoBlockBuildReads += reads;
+            }
+
+            return cached;
+        }
     }
 
     public ResourceLocation sectionMaterial() {

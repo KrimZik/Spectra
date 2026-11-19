@@ -531,6 +531,10 @@ public final class SpectraProfileCommand {
             measurePathDiagnostic("CACHED_WORLD_WAVE", cachedWorld, diagnosticReceivers, emitterCount, memory);
             measurePathDiagnostic("FULL_RECEPTION_SAMPLE", fullReception, diagnosticReceivers, emitterCount, memory);
 
+            profileTraversal("RAW_FACTOR_ONLY", rawFactorOnly);
+            profileTraversal("RAW_WORLD_BATCHED", rawWorldBatched);
+            profileTraversal("FULL_RECEPTION_SAMPLE", fullReception);
+
             checksum = sink[0];
             source.sendSuccess(() -> Component.literal("Multi-receiver profiling complete. Results in latest.log."), false);
 
@@ -568,6 +572,18 @@ public final class SpectraProfileCommand {
         LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] stage=%s receivers=%d median=%.3f ms/sweep allocated=%.1f B/sweep", stage, frames[0].length, times[times.length / 2], allocations[allocations.length / 2]));
         var cacheAfter = engine.materialCacheStats();
         LOGGER.info("[SPECTRA-PROFILE] stage={} cacheHits={} coldMisses={} traceBuilds={} evictions={} entries={}", stage, cacheAfter.cacheHits() - cacheBefore.cacheHits(), cacheAfter.coldMisses() - cacheBefore.coldMisses(), cacheAfter.traceBuilds() - cacheBefore.traceBuilds(), cacheAfter.evictions() - cacheBefore.evictions(), cacheAfter.entries());
+    }
+
+    private static void profileTraversal(String stage, Runnable task) {
+        FrequencyMaterialAttenuation.TraversalStats stats = FrequencyMaterialAttenuation.beginTraversalStats();
+
+        try {
+            task.run();
+        } finally {
+            FrequencyMaterialAttenuation.endTraversalStats();
+        }
+
+        LOGGER.info("[SPECTRA-PROFILE] stage={} traversal={}", stage, stats);
     }
 
     private static void measurePathDiagnostic(String stage, Runnable task, int receivers, int emitters, ThreadMXBean memory) {

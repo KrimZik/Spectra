@@ -5,8 +5,10 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -758,5 +760,98 @@ class FrequencyMaterialPathCacheTest {
         assertEquals(0, stats.uniformSections);
 
         verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void twoBlockSummaryBuildsLazilyAndReusesItsResult() {
+        @SuppressWarnings("unchecked")
+        PalettedContainer<BlockState> states = mock(PalettedContainer.class);
+
+        when(section.getStates()).thenReturn(states);
+        doAnswer(invocation -> {
+            java.util.function.Consumer<BlockState> visitor = invocation.getArgument(0);
+            visitor.accept(Blocks.AIR.defaultBlockState());
+            visitor.accept(Blocks.STONE.defaultBlockState());
+            return null;
+        }).when(states).getAll(any());
+
+        FrequencyMaterialSectionCache summary = FrequencyMaterialSectionCache.create(section);
+
+        assertNotNull(summary);
+        assertTrue(Double.isNaN(summary.sectionLoss()));
+
+        clearInvocations(section);
+
+        FrequencyMaterialAttenuation.TraversalStats stats = FrequencyMaterialAttenuation.beginTraversalStats();
+
+        try {
+            FrequencyMaterialSectionCache.TwoBlockRegion first = summary.twoBlockRegion(2, 0, 0, stats);
+            FrequencyMaterialSectionCache.TwoBlockRegion second = summary.twoBlockRegion(3, 1, 1, stats);
+
+            assertSame(first, second);
+            assertEquals(0.0, first.lossDbPerMeter(), 0.0);
+            assertEquals(FrequencyMaterialClassifier.AIR, first.material());
+            assertEquals(1, stats.twoBlockBuilds);
+            assertEquals(8, stats.twoBlockBuildReads);
+        } finally {
+            FrequencyMaterialAttenuation.endTraversalStats();
+        }
+
+        verify(section, times(8)).getBlockState(anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void twoBlockSkipPreservesAttenuationAndBoundaryPositions() {
+        when(firstSummary.twoBlockRegion(anyInt(), anyInt(), anyInt(), any()))
+                .thenAnswer(invocation -> {
+                    int x = invocation.getArgument(0);
+                    return x >= 2 && x < 4 ? new FrequencyMaterialSectionCache.TwoBlockRegion(0.0, FrequencyMaterialClassifier.AIR) : new FrequencyMaterialSectionCache.TwoBlockRegion(Double.NaN, null);
+                });
+
+        List<Double> fractions = new ArrayList<>();
+
+        MaterialBoundaryCollector collector = new MaterialBoundaryCollector((from, to, fraction, axes) -> fractions.add(fraction));
+        FrequencyMaterialAttenuation.TraversalStats stats = FrequencyMaterialAttenuation.beginTraversalStats();
+
+        double result;
+        try {
+            result = FrequencyMaterialAttenuation.factorWithMaterials(level, start, new Vec3(4.5, 64.5, 0.5), collector);
+        } finally {
+            FrequencyMaterialAttenuation.endTraversalStats();
+        }
+
+        assertEquals(FrequencyMaterialRules.amplitudeFactor(3.0), result, 1.0e-12);
+        assertEquals(2, collector.boundaryCount());
+        assertEquals(List.of(0.125, 0.375), fractions);
+        assertEquals(1, stats.twoBlockSkips);
+        assertEquals(3, stats.blockReads);
+
+        verify(section, never()).getBlockState(eq(2), anyInt(), anyInt());
+        verify(section, never()).getBlockState(eq(3), anyInt(), anyInt());
+    }
+
+    @Test
+    void twoBlockEqualLossDoesNotHideDifferentMaterials() {
+        FrequencyMaterialRules.replaceOverrides(List.of(FrequencyMaterialRules.block(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(Blocks.STONE), 0.0)));
+
+        @SuppressWarnings("unchecked")
+        PalettedContainer<BlockState> states = mock(PalettedContainer.class);
+
+        when(section.getStates()).thenReturn(states);
+
+        doAnswer(invocation -> {
+            java.util.function.Consumer<BlockState> visitor = invocation.getArgument(0);
+            visitor.accept(Blocks.AIR.defaultBlockState());
+            visitor.accept(Blocks.STONE.defaultBlockState());
+            return null;
+        }).when(states).getAll(any());
+
+        FrequencyMaterialSectionCache summary = FrequencyMaterialSectionCache.create(section);
+        assertNotNull(summary);
+
+        FrequencyMaterialSectionCache.TwoBlockRegion region = summary.twoBlockRegion(0, 0, 0, null);
+
+        assertEquals(0.0, region.lossDbPerMeter(), 0.0);
+        assertNull(region.material());
     }
 }
