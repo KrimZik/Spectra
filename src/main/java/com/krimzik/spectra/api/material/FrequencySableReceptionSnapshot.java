@@ -263,6 +263,10 @@ public final class FrequencySableReceptionSnapshot {
         return List.copyOf(results);
     }
 
+    public boolean hasShipIntersections(int index) {
+        return !paths.isEmpty() && !paths.get(index).ships().isEmpty();
+    }
+
     public double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
         if (paths.isEmpty()) {
             Vec3 start = emitters.get(index);

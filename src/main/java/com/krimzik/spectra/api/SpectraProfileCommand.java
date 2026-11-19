@@ -450,6 +450,7 @@ public final class SpectraProfileCommand {
 
         ServerLevel level = source.getLevel();
         FrequencyEngine engine = new FrequencyEngine(level);
+        engine.enableReceptionPathSampling();
         ThreadedProfile profile = new ThreadedProfile(level, engine, emitterCount, receiverCount);
 
         try {
@@ -574,8 +575,8 @@ public final class SpectraProfileCommand {
 
             var stages = profile.engine.receptionTimings();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_STAGES prepareMs=%.3f snapshotMs=%.3f validationMs=%.3f deliveryMs=%.3f synchronousMs=%.3f workerThreadRunMs=%.3f p95ActiveTickMs=%.3f maxActiveTickMs=%.3f activeTicks=%d adaptiveSyncRequests=%d materialValidationMs=%.3f emitterValidationMs=%.3f", stages.prepareMs(), stages.snapshotMs(), stages.validationMs(), stages.deliveryMs(), stages.synchronousMs(), stages.workerThreadRunMs(), stages.p95ActiveTickMs(), stages.maxActiveTickMs(), stages.activeTicks(), stages.adaptiveSyncRequests(), stages.materialValidationMs(), stages.emitterValidationMs()));
-
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] SNAPSHOT_CAPTURE pathsMs=%.3f worldMs=%.3f otherMs=%.3f", stages.snapshotPathsMs(), stages.snapshotWorldMs(), Math.max(0.0, stages.snapshotMs() - stages.snapshotPathsMs() - stages.snapshotWorldMs())));
+            LOGGER.info("[SPECTRA-PROFILE] SNAPSHOT_PATH_SAMPLES {}", profile.engine.receptionPathSamplesSummary());
 
             var scheduler = profile.engine.receptionSchedulerDiagnostics();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_SCHEDULER headBlockedTicks=%d readyBehindHeadTicks=%d peakReadyBehindHead=%d overBudgetTicks=%d worstTickPrepareMs=%.3f worstTickSnapshotMs=%.3f worstTickValidationMs=%.3f worstTickDeliveryMs=%.3f worstTickSyncMs=%.3f worstTickOtherMs=%.3f", scheduler.headBlockedTicks(), scheduler.readyBehindHeadTicks(), scheduler.peakReadyBehindHead(), scheduler.overBudgetTicks(), scheduler.worstTickPrepareMs(), scheduler.worstTickSnapshotMs(), scheduler.worstTickValidationMs(), scheduler.worstTickDeliveryMs(), scheduler.worstTickSyncMs(), scheduler.worstTickOtherMs()));

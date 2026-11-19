@@ -258,6 +258,62 @@ class FrequencyMaterialSnapshotTraversalTest {
     }
 
     @Test
+    void eightBlockRegionsMatchLiveAttenuationAndBoundaries() throws Exception {
+        PalettedContainer<BlockState> states = states();
+
+        for (int y = 0; y < 8; y++) {
+            for (int z = 0; z < 8; z++) {
+                for (int x = 0; x < 8; x++) {
+                    states.set(x, y, z, Blocks.STONE.defaultBlockState());
+                }
+            }
+        }
+
+        chunk(0, 0, states);
+
+        assertSnapshotMatchesLive(new Vec3(0.5, 64.5, 0.5), new Vec3(7.5, 64.5, 0.5), 21.0);
+        assertSnapshotMatchesLive(new Vec3(7.5, 64.5, 0.5), new Vec3(9.5, 64.5, 0.5), 1.5);
+    }
+
+    @Test
+    void snapshotWaveWorkspaceResetsAcrossPathsAndThreads() throws Exception {
+        PalettedContainer<BlockState> states = states();
+        states.set(1, 0, 0, Blocks.STONE.defaultBlockState());
+        states.set(2, 0, 0, Blocks.GLASS.defaultBlockState());
+        chunk(0, 0, states);
+
+        Vec3 materialStart = new Vec3(0.5, 64.5, 0.5);
+        Vec3 materialEnd = new Vec3(4.5, 64.5, 0.5);
+        Vec3 airStart = new Vec3(5.5, 64.5, 0.5);
+        Vec3 airEnd = new Vec3(6.5, 64.5, 0.5);
+
+        FrequencyMaterialWorldSnapshot snapshot = FrequencyMaterialWorldSnapshot.builder(level).includePath(materialStart, materialEnd).includePath(airStart, airEnd).build();
+        MinecraftWaveMediumResolver resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.STONE, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(new MinecraftMaterialPropagation(level), resolver);
+
+        double materialExpected = wave.evaluate(materialStart, materialEnd, List.of(), 1000.0, true);
+        double airExpected = wave.evaluate(airStart, airEnd, List.of(), 1000.0, true);
+
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+
+        try {
+            List<CompletableFuture<Double>> tasks = new ArrayList<>();
+
+            for (int i = 0; i < 128; i++) {
+                boolean material = (i & 1) == 0;
+
+                tasks.add(CompletableFuture.supplyAsync(() -> material ? wave.factorSnapshot(snapshot, materialStart, materialEnd, 1000.0) : wave.factorSnapshot(snapshot, airStart, airEnd, 1000.0), executor));
+            }
+
+            for (int i = 0; i < tasks.size(); i++) {
+                assertEquals((i & 1) == 0 ? materialExpected : airExpected, tasks.get(i).get(), 1.0e-12);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void negativeChunkBoundaryMatchesLiveTraversal() throws Exception {
         PalettedContainer<BlockState> left = states();
         left.set(15, 0, 0, Blocks.STONE.defaultBlockState());
@@ -426,5 +482,35 @@ class FrequencyMaterialSnapshotTraversalTest {
 
         assertEquals(FrequencySableReceptionSnapshot.capture(level, nearEnd, List.of(nearStart), List.of()).factor(0, frequency, false, null), snapshots.get(0).factor(0, frequency, false, null), 1.0e-12);
         assertEquals(FrequencySableReceptionSnapshot.capture(level, farEnd, List.of(farStart), List.of()).factor(0, frequency, false, null), snapshots.get(1).factor(0, frequency, false, null), 1.0e-12);
+    }
+
+    @Test
+    void sampledSnapshotPathsDistinguishUniformAndMixedMaterials() {
+        PalettedContainer<BlockState> states = states();
+        states.set(1, 0, 0, Blocks.STONE.defaultBlockState());
+        states.set(2, 0, 0, Blocks.GLASS.defaultBlockState());
+        chunk(0, 0, states);
+
+        Vec3 mixedStart = new Vec3(0.5, 64.5, 0.5);
+        Vec3 mixedEnd = new Vec3(3.5, 64.5, 0.5);
+        Vec3 uniformStart = new Vec3(4.5, 64.5, 0.5);
+        Vec3 uniformEnd = new Vec3(5.5, 64.5, 0.5);
+
+        FrequencyMaterialWorldSnapshot snapshot = FrequencyMaterialWorldSnapshot.builder(level).includePath(mixedStart, mixedEnd).includePath(uniformStart, uniformEnd).build();
+        FrequencyMaterialAttenuation.MaterialSegmentConsumer discard = (material, from, to, axes) -> {};
+
+        var uniform = FrequencyMaterialAttenuation.sampleSnapshotPath(() -> FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, uniformStart, uniformEnd, discard));
+        var mixed = FrequencyMaterialAttenuation.sampleSnapshotPath(() -> FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, mixedStart, mixedEnd, discard));
+
+        assertTrue(uniform.complete());
+        assertTrue(uniform.uniform());
+        assertTrue(uniform.steps() > 0);
+
+        assertTrue(mixed.complete());
+        assertFalse(mixed.uniform());
+        assertTrue(mixed.segments() >= 2);
+        assertTrue(mixed.steps() > 0);
+
+        assertEquals(FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, mixedStart, mixedEnd, discard), mixed.factor(), 1.0e-12);
     }
 }

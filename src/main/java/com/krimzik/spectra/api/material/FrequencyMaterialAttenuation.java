@@ -15,6 +15,7 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.function.DoubleSupplier;
 
 public final class FrequencyMaterialAttenuation {
     private static volatile boolean enabled;
@@ -81,6 +82,7 @@ public final class FrequencyMaterialAttenuation {
         long unloadedChunks;
         long sections;
         long uniformSections;
+        long uniformEightRegions;
         long uniformRegions;
         long blockReads;
         long sameSectionPaths;
@@ -92,12 +94,41 @@ public final class FrequencyMaterialAttenuation {
         long twoBlockSkips;
         long twoBlockBuilds;
         long twoBlockBuildReads;
+        MaterialProbe probe;
 
         @Override
         public String toString() {
-            return "paths=" + paths + " unloadedChunks=" + unloadedChunks + " sections=" + sections + " uniformSections=" + uniformSections + " uniformRegions=" + uniformRegions + " blockReads=" + blockReads + " sameSectionPaths=" + sameSectionPaths + " steps=" + steps + " regionChecks=" + regionChecks + " regionFallbacks=" + regionFallbacks + " materialSegments=" + materialSegments + " twoBlockChecks=" + twoBlockChecks + " twoBlockSkips=" + twoBlockSkips + " twoBlockBuilds=" + twoBlockBuilds + " twoBlockBuildReads=" + twoBlockBuildReads;
+            return "paths=" + paths + " unloadedChunks=" + unloadedChunks + " sections=" + sections + " uniformSections=" + uniformSections + " uniformRegions=" + uniformRegions + " blockReads=" + blockReads + " sameSectionPaths=" + sameSectionPaths + " steps=" + steps + " regionChecks=" + regionChecks + " regionFallbacks=" + regionFallbacks + " materialSegments=" + materialSegments + " twoBlockChecks=" + twoBlockChecks + " twoBlockSkips=" + twoBlockSkips + " twoBlockBuilds=" + twoBlockBuilds + " twoBlockBuildReads=" + twoBlockBuildReads + " uniformEightRegions=" + uniformEightRegions;
         }
     }
+
+    private static final class MaterialProbe implements MaterialSegmentConsumer {
+        MaterialSegmentConsumer delegate;
+        ResourceLocation firstMaterial;
+        double firstLoss;
+        long segments;
+        boolean mixed;
+
+        @Override
+        public void accept(ResourceLocation material, double from, double to, int axes) {
+            delegate.accept(material, from, to, axes);
+        }
+
+        @Override
+        public void acceptWithLoss(ResourceLocation material, double from, double to, int axes, double loss) {
+            if (segments == 0L) {
+                firstMaterial = material;
+                firstLoss = loss;
+            } else if (!firstMaterial.equals(material) || Double.compare(firstLoss, loss) != 0) {
+                mixed = true;
+            }
+
+            segments++;
+            delegate.acceptWithLoss(material, from, to, axes, loss);
+        }
+    }
+
+    public record SnapshotPathSample(double factor, boolean complete, boolean uniform, long segments, long steps, long sections, long regionChecks, long uniformSections, long uniformEightRegions, long uniformRegions, long blockReads) {}
 
     public static TraversalStats beginTraversalStats() {
         if (ACTIVE_STATS.get() != null) {
@@ -111,6 +142,22 @@ public final class FrequencyMaterialAttenuation {
 
     public static void endTraversalStats() {
         ACTIVE_STATS.remove();
+    }
+
+    public static SnapshotPathSample sampleSnapshotPath(DoubleSupplier calculation) {
+        Objects.requireNonNull(calculation);
+
+        TraversalStats stats = beginTraversalStats();
+        stats.probe = new MaterialProbe();
+
+        try {
+            double factor = calculation.getAsDouble();
+            MaterialProbe probe = stats.probe;
+
+            return new SnapshotPathSample(factor, Double.isFinite(factor) && probe.segments > 0, probe.segments > 0 && !probe.mixed, probe.segments, stats.steps, stats.sections, stats.regionChecks, stats.uniformSections, stats.uniformEightRegions, stats.uniformRegions, stats.blockReads);
+        } finally {
+            endTraversalStats();
+        }
     }
 
     private FrequencyMaterialAttenuation() {}
@@ -233,6 +280,11 @@ public final class FrequencyMaterialAttenuation {
         TraversalStats stats = ACTIVE_STATS.get();
         if (stats != null) {
             stats.paths++;
+
+            if (stats.probe != null && consumer != null) {
+                stats.probe.delegate = consumer;
+                consumer = stats.probe;
+            }
         }
 
         if (!active && consumer == null) {
@@ -435,11 +487,6 @@ public final class FrequencyMaterialAttenuation {
 
                 if (Double.isNaN(regionLoss) && materialCache != null) {
                     regionLoss = materialCache.sectionLoss();
-
-                    if (Double.isNaN(regionLoss)) {
-                        shift = 2;
-                        regionLoss = materialCache.regionLoss(x & 15, y & 15, z & 15);
-                    }
                 }
 
                 ResourceLocation regionMaterial = null;
@@ -448,9 +495,21 @@ public final class FrequencyMaterialAttenuation {
                         regionMaterial = FrequencyMaterialClassifier.AIR;
                     } else if (materialCache != null) {
                         regionMaterial = materialCache.sectionMaterial();
+                    }
+                }
 
-                        if (regionMaterial == null) {
-                            shift = 2;
+                if (materialCache != null && (!(regionLoss >= 0.0) || (consumer != null && regionMaterial == null))) {
+                    FrequencyMaterialSectionCache.Region8 large = materialCache.region8(x & 15, y & 15, z & 15);
+
+                    if (large != null) {
+                        shift = 3;
+                        regionLoss = large.loss();
+                        regionMaterial = large.material();
+                    } else {
+                        shift = 2;
+                        regionLoss = materialCache.regionLoss(x & 15, y & 15, z & 15);
+
+                        if (consumer != null && regionLoss >= 0.0) {
                             regionMaterial = materialCache.regionMaterial(x & 15, y & 15, z & 15);
                         }
                     }
@@ -487,6 +546,8 @@ public final class FrequencyMaterialAttenuation {
                         if (stats != null) {
                             if (shift == 4) {
                                 stats.uniformSections++;
+                            } else if (shift == 3) {
+                                stats.uniformEightRegions++;
                             } else if (shift == 2) {
                                 stats.uniformRegions++;
                             } else {

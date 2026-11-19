@@ -14,6 +14,7 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
     private final MinecraftMaterialPropagation propagation;
     private final MinecraftWaveMediumResolver resolver;
     private final WaveBoundaryAccumulator boundaries = new WaveBoundaryAccumulator();
+    private final ThreadLocal<SnapshotWorkspace> snapshotWorkspaces = ThreadLocal.withInitial(SnapshotWorkspace::new);
 
     private ResourceLocation previousMaterial;
     private double frequencyHz;
@@ -106,24 +107,53 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
         boundaries.crossNormal(first, second, reflectionEnabled);
     }
 
-    public double factorSnapshot(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, double frequencyHz) {
-        WaveBoundaryAccumulator result = new WaveBoundaryAccumulator();
+    private static final class SnapshotWorkspace implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
+        final WaveBoundaryAccumulator boundaries = new WaveBoundaryAccumulator();
 
-        class SnapshotConsumer implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
-            private ResourceLocation previous;
+        MinecraftWaveMediumResolver resolver;
+        ResourceLocation previous;
+        double frequencyHz;
+        boolean busy;
 
-            @Override
-            public void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes) {
-                if (previous != null && !previous.equals(material)) {
-                    result.crossNormal(resolver.resolveMaterial(previous, frequencyHz), resolver.resolveMaterial(material, frequencyHz), true);
-                }
-
-                previous = material;
-            }
+        void begin(MinecraftWaveMediumResolver resolver, double frequencyHz) {
+            busy = true;
+            this.resolver = resolver;
+            this.frequencyHz = frequencyHz;
+            previous = null;
+            boundaries.reset();
         }
 
-        double attenuation = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, start, end, new SnapshotConsumer());
-        return Double.isFinite(attenuation) ? attenuation * result.directAmplitudeFactor() : Double.NaN;
+        @Override
+        public void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes) {
+            if (previous != null && !previous.equals(material)) {
+                boundaries.crossNormal(resolver.resolveMaterial(previous, frequencyHz), resolver.resolveMaterial(material, frequencyHz), true);
+            }
+
+            previous = material;
+        }
+
+        void end() {
+            previous = null;
+            resolver = null;
+            busy = false;
+        }
+    }
+
+    public double factorSnapshot(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, double frequencyHz) {
+        SnapshotWorkspace workspace = snapshotWorkspaces.get();
+
+        if (workspace.busy) {
+            workspace = new SnapshotWorkspace();
+        }
+
+        workspace.begin(resolver, frequencyHz);
+
+        try {
+            double attenuation = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, start, end, workspace);
+            return Double.isFinite(attenuation) ? attenuation * workspace.boundaries.directAmplitudeFactor() : Double.NaN;
+        } finally {
+            workspace.end();
+        }
     }
 
     public double factorSnapshotCombined(MaterialPathOverlay overlay, double distance, double frequencyHz, boolean attenuationEnabled) {

@@ -123,4 +123,24 @@ class FrequencyMaterialSectionCacheTest {
 
         verify(section, never()).getBlockState(anyInt(), anyInt(), anyInt());
     }
+
+    @Test
+    void eightBlockRegionsRecognizeUniformOctants() {
+        LevelChunkSection section = section(Blocks.AIR.defaultBlockState(), Blocks.STONE.defaultBlockState());
+        when(section.getBlockState(anyInt(), anyInt(), anyInt())).thenAnswer(call -> (int) call.getArgument(0) < 8 ? Blocks.AIR.defaultBlockState() : Blocks.STONE.defaultBlockState());
+
+        FrequencyMaterialSectionCache cache = FrequencyMaterialSectionCache.create(section);
+
+        var air = cache.region8(2, 2, 2);
+        var stone = cache.region8(10, 2, 2);
+
+        assertNotNull(air);
+        assertNotNull(stone);
+        assertEquals(FrequencyMaterialClassifier.AIR, air.material());
+        assertEquals(FrequencyMaterialClassifier.STONE, stone.material());
+        assertEquals(0.0, air.loss(), 0.0);
+        assertEquals(3.0, stone.loss(), 0.0);
+        assertSame(air, cache.region8(7, 7, 7));
+        assertSame(stone, cache.region8(15, 7, 7));
+    }
 }

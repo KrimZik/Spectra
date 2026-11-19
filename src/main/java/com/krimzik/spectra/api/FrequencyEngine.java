@@ -24,6 +24,7 @@ import it.unimi.dsi.fastutil.doubles.Double2IntOpenHashMap;
 import org.slf4j.Logger;
 
 import java.util.*;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
@@ -120,6 +121,7 @@ public final class FrequencyEngine {
     private long receptionDeliveryNanos;
     private long receptionSyncNanos;
     private long receptionWorkerNanos;
+    private ReceptionPathSamples receptionPathSamples;
 
     private final long[] receptionActiveTickNanos = new long[256];
     private int receptionActiveTickCount;
@@ -140,6 +142,54 @@ public final class FrequencyEngine {
     private record ParallelCandidate(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position, double distanceSquared) {}
     private record ReceptionRequest(FrequencyReceiver receiver, ReceiverRegistration registration, double range, FrequencyReceptionConsumer consumer, int retries) {}
     private record PreparedReception(ReceptionRequest request, Vec3 position, double frequency, double tolerance, boolean reflection, List<ParallelCandidate> candidates, List<? extends SubLevelAccess> ships) {}
+
+    private static final class ReceptionPathSamples {
+        final LongAdder sampled = new LongAdder();
+        final LongAdder uniform = new LongAdder();
+        final LongAdder mixed = new LongAdder();
+        final LongAdder empty = new LongAdder();
+        final LongAdder unresolved = new LongAdder();
+        final LongAdder segments = new LongAdder();
+        final LongAdder steps = new LongAdder();
+        final LongAdder sections = new LongAdder();
+        final LongAdder regionChecks = new LongAdder();
+        final LongAdder uniformSections = new LongAdder();
+        final LongAdder uniformEightRegions = new LongAdder();
+        final LongAdder uniformRegions = new LongAdder();
+        final LongAdder blockReads = new LongAdder();
+
+        void add(FrequencyMaterialAttenuation.SnapshotPathSample sample) {
+            sampled.increment();
+
+            if (!sample.complete()) {
+                if (Double.isFinite(sample.factor()) && sample.segments() == 0) {
+                    empty.increment();
+                } else {
+                    unresolved.increment();
+                }
+            } else if (sample.uniform()) {
+                uniform.increment();
+            } else {
+                mixed.increment();
+            }
+
+            segments.add(sample.segments());
+            steps.add(sample.steps());
+            sections.add(sample.sections());
+            regionChecks.add(sample.regionChecks());
+            uniformSections.add(sample.uniformSections());
+            uniformEightRegions.add(sample.uniformEightRegions());
+            uniformRegions.add(sample.uniformRegions());
+            blockReads.add(sample.blockReads());
+        }
+
+        String summary() {
+            long count = sampled.sum();
+            double inverse = 1.0 / Math.max(1L, count);
+
+            return String.format(Locale.ROOT, "stride=256 sampled=%d uniform=%d mixed=%d empty=%d unresolved=%d avgSegments=%.2f avgSteps=%.2f avgSections=%.2f avgRegionChecks=%.2f avgUniformSections=%.2f avgUniformEightRegions=%.2f avgUniformRegions=%.2f avgBlockReads=%.2f", count, uniform.sum(), mixed.sum(), empty.sum(), unresolved.sum(), segments.sum() * inverse, steps.sum() * inverse, sections.sum() * inverse, regionChecks.sum() * inverse, uniformSections.sum() * inverse, uniformEightRegions.sum() * inverse, uniformRegions.sum() * inverse, blockReads.sum() * inverse);
+        }
+    }
 
     private static final class SharedReceptionBatch {
         final List<PreparedReception> receivers;
@@ -1876,6 +1926,7 @@ public final class FrequencyEngine {
             }
 
             boolean reflection = group.getFirst().reflection();
+            ReceptionPathSamples pathSamples = receptionPathSamples;
 
             FrequencyParallelBatch.Job job = FrequencyApi.workers(level.getServer()).submitBatch(total, index -> {
                 int owner = owners[index];
@@ -1884,6 +1935,12 @@ public final class FrequencyEngine {
                 ParallelCandidate candidate = group.get(owner).candidates().get(path);
                 if (candidate.signal().amplitude() == 0.0) {
                     return 1.0;
+                }
+
+                if (pathSamples != null && reflection && (index & 255) == 0 && !snapshots.get(owner).hasShipIntersections(path)) {
+                    var sample = FrequencyMaterialAttenuation.sampleSnapshotPath(() -> snapshots.get(owner).factor(path, candidate.signal().frequencyHz(), reflection, receptionWave));
+                    pathSamples.add(sample);
+                    return sample.factor();
                 }
 
                 return snapshots.get(owner).factor(path, candidate.signal().frequencyHz(), reflection, receptionWave);
@@ -2164,6 +2221,16 @@ public final class FrequencyEngine {
         checkRunning();
 
         return new ReceptionSchedulerDiagnostics(receptionHeadBlockedTicks, receptionReadyBehindHeadTicks, receptionPeakReadyBehindHead, receptionOverBudgetTicks, receptionWorstTickPrepareNanos * 1.0e-6, receptionWorstTickSnapshotNanos * 1.0e-6, receptionWorstTickValidationNanos * 1.0e-6, receptionWorstTickDeliveryNanos * 1.0e-6, receptionWorstTickSyncNanos * 1.0e-6, receptionWorstTickOtherNanos * 1.0e-6);
+    }
+
+    void enableReceptionPathSampling() {
+        checkRunning();
+        receptionPathSamples = new ReceptionPathSamples();
+    }
+
+    String receptionPathSamplesSummary() {
+        checkRunning();
+        return receptionPathSamples == null ? "disabled" : receptionPathSamples.summary();
     }
 
     void shutdown() {

@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 import java.util.Arrays;
 
 public final class FrequencyMaterialSectionCache {
+    record Region8(double loss, ResourceLocation material) {}
     private final long revision;
     private final LevelChunkSection section;
     private final FrequencyMaterialSectionSnapshot snapshot;
@@ -23,6 +24,8 @@ public final class FrequencyMaterialSectionCache {
     private static final VarHandle TWO_BLOCK_LOSS = MethodHandles.arrayElementVarHandle(double[].class);
     private static final VarHandle REGION_LOSS = MethodHandles.arrayElementVarHandle(double[].class);
     private static final VarHandle REGION_MATERIAL = MethodHandles.arrayElementVarHandle(Object[].class);
+    private static final VarHandle REGION_8 = MethodHandles.arrayElementVarHandle(Object[].class);
+    private volatile Object[] eightBlockRegions;
 
     private volatile double[] twoBlockLosses;
     private ResourceLocation[] twoBlockMaterials;
@@ -105,6 +108,64 @@ public final class FrequencyMaterialSectionCache {
 
     public double sectionLoss() {
         return sectionLoss;
+    }
+
+    Region8 region8(int x, int y, int z) {
+        int index = ((y >> 3) << 2) | ((z >> 3) << 1) | (x >> 3);
+
+        Object[] regions = eightBlockRegions;
+
+        if (regions == null) {
+            synchronized (this) {
+                regions = eightBlockRegions;
+                if (regions == null) {
+                    regions = new Object[8];
+                    eightBlockRegions = regions;
+                }
+            }
+        }
+
+        Object value = REGION_8.getAcquire(regions, index);
+        if (value == null) {
+            synchronized (this) {
+                value = REGION_8.getAcquire(regions, index);
+
+                if (value == null) {
+                    int baseX = x & 8;
+                    int baseY = y & 8;
+                    int baseZ = z & 8;
+
+                    double loss = regionLoss(baseX, baseY, baseZ);
+                    ResourceLocation material = loss >= 0.0 ? regionMaterial(baseX, baseY, baseZ) : null;
+                    boolean uniform = loss >= 0.0 && material != null;
+
+                    outer:
+                    for (int dy = 0; dy < 8 && uniform; dy += 4) {
+                        for (int dz = 0; dz < 8; dz += 4) {
+                            for (int dx = 0; dx < 8; dx += 4) {
+                                if (dx == 0 && dy == 0 && dz == 0) {
+                                    continue;
+                                }
+
+                                int bx = baseX + dx;
+                                int by = baseY + dy;
+                                int bz = baseZ + dz;
+
+                                if (Double.compare(regionLoss(bx, by, bz), loss) != 0 || !material.equals(regionMaterial(bx, by, bz))) {
+                                    uniform = false;
+                                    break outer;
+                                }
+                            }
+                        }
+                    }
+
+                    value = uniform ? new Region8(loss, material) : MIXED;
+                    REGION_8.setRelease(regions, index, value);
+                }
+            }
+        }
+
+        return value instanceof Region8 region ? region : null;
     }
 
     public double regionLoss(int x, int y, int z) {
