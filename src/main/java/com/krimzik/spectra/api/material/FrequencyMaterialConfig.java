@@ -20,6 +20,12 @@ public final class FrequencyMaterialConfig {
     private static volatile boolean refractionEnabled;
     private static volatile boolean diffractionEnabled;
 
+    private static final int LOGICAL_PROCESSORS = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private static final int DEFAULT_THREADS = Math.min(8, LOGICAL_PROCESSORS / 2);
+
+    private static final ModConfigSpec.IntValue THREADS;
+    private static volatile int workerThreads = DEFAULT_THREADS;
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -51,6 +57,12 @@ public final class FrequencyMaterialConfig {
                 .define("diffractionEnabled", true);
         builder.pop();
 
+        builder.push("performance");
+        THREADS = builder
+                .comment("Maximum threads allocated. Set to 0 to disable background processing.")
+                .defineInRange("workerThreads", DEFAULT_THREADS, 0, LOGICAL_PROCESSORS);
+        builder.pop();
+
         SPEC = builder.build();
     }
 
@@ -66,6 +78,10 @@ public final class FrequencyMaterialConfig {
 
     public static boolean diffractionEnabled() {
         return diffractionEnabled;
+    }
+
+    public static int workerThreads() {
+        return workerThreads;
     }
 
     public static void register(IEventBus bus, ModContainer container) {
@@ -90,6 +106,7 @@ public final class FrequencyMaterialConfig {
             reflectionEnabled = true;
             refractionEnabled = true;
             diffractionEnabled = true;
+            workerThreads = DEFAULT_THREADS;
         }
     }
 
@@ -101,6 +118,7 @@ public final class FrequencyMaterialConfig {
             reflectionEnabled = REFLECTION.get();
             refractionEnabled = REFRACTION.get();
             diffractionEnabled = DIFFRACTION.get();
+            workerThreads = THREADS.get();
         }
     }
 }

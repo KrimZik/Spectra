@@ -28,6 +28,7 @@ public final class FrequencyApi {
     private static final int RECEIVER_SPATIAL_REFRESH_BUDGET = 128;
     private static final Map<ServerLevel, FrequencyEngine> ENGINES = new IdentityHashMap<>();
     private static final Map<MinecraftServer, FrequencyBridgeRegistry> BRIDGES = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, FrequencyWorkerPool> WORKER_POOLS = new IdentityHashMap<>();
 
     private FrequencyApi() {}
 
@@ -124,6 +125,16 @@ public final class FrequencyApi {
         return BRIDGES.computeIfAbsent(server, FrequencyBridgeRegistry::new);
     }
 
+    static FrequencyWorkerPool workers(MinecraftServer server) {
+        Objects.requireNonNull(server);
+
+        if (!server.isSameThread()) {
+            throw new IllegalStateException("Spectra worker pool must be accessed from the server thread");
+        }
+
+        return WORKER_POOLS.computeIfAbsent(server, FrequencyWorkerPool::new);
+    }
+
     private static void onChunkUnload(ChunkEvent.Unload event) {
         if (!(event.getLevel() instanceof ServerLevel level)) {
             return;
@@ -156,11 +167,11 @@ public final class FrequencyApi {
             return;
         }
 
-        if (engine.pendingReceiverWorldPositionRefreshCount() == 0) {
-            return;
+        if (engine.pendingReceiverWorldPositionRefreshCount() != 0) {
+            engine.processDirtyReceiverWorldPositionsForTick(RECEIVER_SPATIAL_REFRESH_BUDGET);
         }
 
-        engine.processDirtyReceiverWorldPositionsForTick(RECEIVER_SPATIAL_REFRESH_BUDGET);
+        engine.processCompletedReceptionBatches();
     }
 
     static void onLevelUnload(LevelEvent.Unload event) {
@@ -171,8 +182,13 @@ public final class FrequencyApi {
 
     private static void onServerStopped(ServerStoppedEvent event) {
         MinecraftServer server = event.getServer();
-        FrequencyBridgeRegistry registry = BRIDGES.remove(server);
 
+        FrequencyWorkerPool workerPool = WORKER_POOLS.remove(server);
+        if (workerPool != null) {
+            workerPool.shutdown();
+        }
+
+        FrequencyBridgeRegistry registry = BRIDGES.remove(server);
         if (registry != null) {
             registry.shutdown();
         }

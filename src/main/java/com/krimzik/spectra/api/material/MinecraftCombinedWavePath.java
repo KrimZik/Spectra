@@ -106,6 +106,64 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
         boundaries.crossNormal(first, second, reflectionEnabled);
     }
 
+    public double factorSnapshot(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, double frequencyHz) {
+        WaveBoundaryAccumulator result = new WaveBoundaryAccumulator();
+
+        class SnapshotConsumer implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
+            private ResourceLocation previous;
+
+            @Override
+            public void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes) {
+                if (previous != null && !previous.equals(material)) {
+                    result.crossNormal(resolver.resolveMaterial(previous, frequencyHz), resolver.resolveMaterial(material, frequencyHz), true);
+                }
+
+                previous = material;
+            }
+        }
+
+        double attenuation = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, start, end, new SnapshotConsumer());
+        return Double.isFinite(attenuation) ? attenuation * result.directAmplitudeFactor() : Double.NaN;
+    }
+
+    public double factorSnapshotCombined(MaterialPathOverlay overlay, double distance, double frequencyHz, boolean attenuationEnabled) {
+        if (!Double.isFinite(distance) || distance < 0.0 || !Double.isFinite(frequencyHz) || frequencyHz <= 0.0) {
+            throw new IllegalArgumentException("Invalid snapshot wave path");
+        }
+
+        WaveBoundaryAccumulator transmission = new WaveBoundaryAccumulator();
+        class Collector implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
+            ResourceLocation previous;
+            double loss;
+
+            @Override
+            public void accept(ResourceLocation material, double from, double to, int axes) {
+                throw new IllegalStateException("Missing exact material attenuation");
+            }
+
+            @Override
+            public void acceptWithLoss(ResourceLocation material, double from, double to, int axes, double decibelsPerMeter) {
+                if (previous != null && !previous.equals(material)) {
+                    transmission.crossNormal(resolver.resolveMaterial(previous, frequencyHz), resolver.resolveMaterial(material, frequencyHz), true);
+                }
+
+                if (attenuationEnabled) {
+                    loss = Math.fma(decibelsPerMeter, distance * (to - from), loss);
+                }
+
+                previous = material;
+            }
+        }
+
+        Collector collector = new Collector();
+        if (!overlay.replayWithLoss(collector)) {
+            return Double.NaN;
+        }
+
+        double attenuation = attenuationEnabled ? FrequencyMaterialRules.amplitudeFactor(collector.loss) : 1.0;
+        return attenuation * transmission.directAmplitudeFactor();
+    }
+
     public double attenuationFactor() {
         return attenuationFactor;
     }

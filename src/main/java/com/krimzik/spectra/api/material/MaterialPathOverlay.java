@@ -69,6 +69,12 @@ public final class MaterialPathOverlay implements FrequencyMaterialAttenuation.M
         }
     }
 
+    void addSnapshotShip(ResourceLocation material, double start, double end, double decibelsPerMeter) {
+        if (!FrequencyMaterialClassifier.AIR.equals(material)) {
+            add(material, start, end, 0, true, decibelsPerMeter);
+        }
+    }
+
     private void add(ResourceLocation material, double start, double end, int enteredAxes, boolean ship, double decibelsPerMeter) {
         Objects.requireNonNull(material);
 

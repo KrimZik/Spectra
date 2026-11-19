@@ -27,6 +27,9 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+import net.neoforged.neoforge.event.tick.LevelTickEvent;
 import org.slf4j.Logger;
 
 import java.lang.management.ManagementFactory;
@@ -39,6 +42,36 @@ public final class SpectraProfileCommand {
     private static final double FREQUENCY = 915_000_000.0;
     private static final double RANGE = 64.0;
     private static volatile double checksum;
+    private static ThreadedProfile activeThreadedProfile;
+
+    private static final class ThreadedProfile {
+        final ServerLevel level;
+        final FrequencyEngine engine;
+        final Thread serverThread;
+        final int emitters;
+        final int receivers;
+
+        long baselineCallbacks;
+        long callbacks;
+        long immediateCallbacks;
+        long syncNanos;
+        long submitNanos;
+        long completionNanos;
+        long startedNanos;
+        long startedTick;
+        long syncAllocated;
+        long submitAllocated;
+        int queued;
+        boolean offThread;
+
+        ThreadedProfile(ServerLevel level, FrequencyEngine engine, int emitters, int receivers) {
+            this.level = level;
+            this.engine = engine;
+            this.emitters = emitters;
+            this.receivers = receivers;
+            this.serverThread = Thread.currentThread();
+        }
+    }
 
     private SpectraProfileCommand() {}
 
@@ -70,6 +103,12 @@ public final class SpectraProfileCommand {
                                 .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 16))
                                 .then(Commands.argument("receivers", IntegerArgumentType.integer(1, 1000))
                                         .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers")))))
+                        .then(Commands.literal("threaded")
+                                .executes(context -> profileThreaded(context.getSource(), 1200, 2))
+                                .then(Commands.argument("emitters", IntegerArgumentType.integer(1024, 3000))
+                                        .executes(context -> profileThreaded(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 2))
+                                        .then(Commands.argument("receivers", IntegerArgumentType.integer(1, 3000))
+                                                .executes(context -> profileThreaded(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers"))))))
         );
         event.getDispatcher().register(
                 Commands.literal("spectra_profile_material_lookup")
@@ -400,6 +439,167 @@ public final class SpectraProfileCommand {
         } finally {
             FrequencyMaterialAttenuation.setEnabled(originalMaterials);
             engine.shutdown();
+        }
+    }
+
+    private static int profileThreaded(CommandSourceStack source, int emitterCount, int receiverCount) {
+        if (activeThreadedProfile != null) {
+            source.sendFailure(Component.literal("A threaded reception profile is already running"));
+            return 0;
+        }
+
+        ServerLevel level = source.getLevel();
+        FrequencyEngine engine = new FrequencyEngine(level);
+        ThreadedProfile profile = new ThreadedProfile(level, engine, emitterCount, receiverCount);
+
+        try {
+            Vec3 origin = source.getPosition();
+            FrequencySignal signal = new FrequencySignal(FREQUENCY, 1.0, 0.0, 343.0);
+
+            for (int i = 0; i < emitterCount; i++) {
+                Vec3 position = origin.add(i % 21 - 10, (i / 441) % 21 - 10, (i / 21) % 21 - 10);
+                engine.registerChunkBound(net.minecraft.core.BlockPos.containing(position), new Emitter(position, signal));
+            }
+
+            Receiver[] receivers = new Receiver[receiverCount];
+
+            for (int i = 0; i < receiverCount; i++) {
+                double x = receiverCount > 32 ? i % 32 - 15.5 : (i % 8 - 3.5) * 3.0;
+                double z = receiverCount > 32 ? i / 32 - 15.5 : (i / 8 - 1.5) * 3.0;
+
+                receivers[i] = new Receiver(origin.add(x, 0.0, z), FREQUENCY, 0.0);
+                engine.registerReceiver(receivers[i]);
+            }
+
+            for (int warmup = 0; warmup < 2; warmup++) {
+                for (Receiver receiver : receivers) {
+                    engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distance, amplitude, travelTime) -> {});
+                }
+            }
+
+            ThreadMXBean memory = memoryBean();
+            long threadId = Thread.currentThread().threadId();
+
+            long beforeSync = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+            long startSync = System.nanoTime();
+
+            for (Receiver receiver : receivers) {
+                engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distance, amplitude, travelTime) -> profile.baselineCallbacks++);
+            }
+
+            profile.syncNanos = System.nanoTime() - startSync;
+            profile.syncAllocated = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId) - beforeSync;
+
+            long beforeSubmit = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
+
+            profile.startedNanos = System.nanoTime();
+            profile.startedTick = level.getGameTime();
+
+            for (Receiver receiver : receivers) {
+                engine.scheduleReceptionInRange(receiver, RANGE, (emitter, current, distance, amplitude, travelTime) -> {
+                    if (Thread.currentThread() != profile.serverThread) {
+                        profile.offThread = true;
+                    }
+
+                    profile.callbacks++;
+                });
+            }
+
+            profile.submitNanos = System.nanoTime() - profile.startedNanos;
+            profile.submitAllocated = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId) - beforeSubmit;
+            profile.immediateCallbacks = profile.callbacks;
+            profile.queued = engine.pendingReceptionBatchCount();
+
+            LOGGER.info("[SPECTRA-PROFILE] THREADED_DECISION reason={} materials={} reflection={} workers={}", engine.lastReceptionDecision(), FrequencyMaterialAttenuation.enabled(), FrequencyMaterialConfig.reflectionEnabled(), FrequencyMaterialConfig.workerThreads());
+
+            if (profile.queued == 0) {
+                finishThreadedProfile(profile, false);
+            } else {
+                activeThreadedProfile = profile;
+            }
+
+            source.sendSuccess(() -> Component.literal("Threaded reception profiling started. Results in latest.log."), false);
+
+            return 1;
+        } catch (RuntimeException | Error exception) {
+            if (activeThreadedProfile == profile) {
+                activeThreadedProfile = null;
+            }
+
+            engine.shutdown();
+            throw exception;
+        }
+    }
+
+    @SubscribeEvent
+    public static void onThreadedProfileTick(LevelTickEvent.Post event) {
+        ThreadedProfile profile = activeThreadedProfile;
+
+        if (profile == null || event.getLevel() != profile.level) {
+            return;
+        }
+
+        long start = System.nanoTime();
+
+        try {
+            profile.engine.processCompletedReceptionBatches();
+            profile.completionNanos += System.nanoTime() - start;
+
+            if (profile.engine.pendingReceptionBatchCount() == 0) {
+                finishThreadedProfile(profile, false);
+            } else if (profile.level.getGameTime() - profile.startedTick >= 600) {
+                finishThreadedProfile(profile, true);
+            }
+        } catch (RuntimeException exception) {
+            LOGGER.error("Threaded reception profiling failed", exception);
+            activeThreadedProfile = null;
+            profile.engine.shutdown();
+        }
+    }
+
+    private static void finishThreadedProfile(ThreadedProfile profile, boolean timedOut) {
+        if (activeThreadedProfile == profile) {
+            activeThreadedProfile = null;
+        }
+
+        try {
+            double syncMs = profile.syncNanos / 1_000_000.0;
+            double submitMs = profile.submitNanos / 1_000_000.0;
+            double completionMs = profile.completionNanos / 1_000_000.0;
+            double mainMs = submitMs + completionMs;
+            double wallMs = (System.nanoTime() - profile.startedNanos) / 1_000_000.0;
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] THREADED_RECEPTION status=%s emitters=%d receivers=%d threads=%d queued=%d immediateCallbacks=%d expectedCallbacks=%d actualCallbacks=%d offThread=%s syncMs=%.3f submitMainMs=%.3f completionMainMs=%.3f totalMainMs=%.3f wallMs=%.3f syncAllocated=%d B submitAllocated=%d B", timedOut ? "TIMEOUT" : "COMPLETE", profile.emitters, profile.receivers, FrequencyMaterialConfig.workerThreads(), profile.queued, profile.immediateCallbacks, profile.baselineCallbacks, profile.callbacks, profile.offThread, syncMs, submitMs, completionMs, mainMs, wallMs, profile.syncAllocated, profile.submitAllocated));
+            LOGGER.info("[SPECTRA-PROFILE] SHARED_RECEPTION submittedBatches={} inFlightBatches={} outstandingRequests={}", profile.engine.submittedReceptionBatchCount(), profile.engine.inFlightReceptionBatchCount(), profile.engine.pendingReceptionBatchCount());
+
+            var stages = profile.engine.receptionTimings();
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_STAGES prepareMs=%.3f snapshotMs=%.3f validationMs=%.3f deliveryMs=%.3f synchronousMs=%.3f workerThreadRunMs=%.3f p95ActiveTickMs=%.3f maxActiveTickMs=%.3f activeTicks=%d adaptiveSyncRequests=%d materialValidationMs=%.3f emitterValidationMs=%.3f", stages.prepareMs(), stages.snapshotMs(), stages.validationMs(), stages.deliveryMs(), stages.synchronousMs(), stages.workerThreadRunMs(), stages.p95ActiveTickMs(), stages.maxActiveTickMs(), stages.activeTicks(), stages.adaptiveSyncRequests(), stages.materialValidationMs(), stages.emitterValidationMs()));
+
+            if (timedOut || profile.callbacks != profile.baselineCallbacks || profile.offThread) {
+                LOGGER.warn("[SPECTRA-PROFILE] Threaded reception did not match the synchronous callback count or thread requirements");
+            }
+        } finally {
+            profile.engine.shutdown();
+        }
+    }
+
+    @SubscribeEvent
+    public static void onThreadedProfileLevelUnload(LevelEvent.Unload event) {
+        ThreadedProfile profile = activeThreadedProfile;
+
+        if (profile != null && event.getLevel() == profile.level) {
+            activeThreadedProfile = null;
+            profile.engine.shutdown();
+        }
+    }
+
+    @SubscribeEvent
+    public static void onThreadedProfileServerStopped(ServerStoppedEvent event) {
+        ThreadedProfile profile = activeThreadedProfile;
+
+        if (profile != null && profile.level.getServer() == event.getServer()) {
+            activeThreadedProfile = null;
+            profile.engine.shutdown();
         }
     }
 

@@ -168,6 +168,40 @@ public final class FrequencyMaterialAttenuation {
         return factor(level, start.x, start.y, start.z, end.x, end.y, end.z, false, null, consumer);
     }
 
+    public static double factorSnapshot(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end) {
+        Objects.requireNonNull(snapshot);
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+
+        return scan(null, snapshot, start.x, start.y, start.z, end.x, end.y, end.z, false, null, null);
+    }
+
+    static double factorSnapshotRelativeToAir(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end) {
+        Objects.requireNonNull(snapshot);
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+
+        return scan(null, snapshot, start.x, start.y, start.z, end.x, end.y, end.z, true, null, null);
+    }
+
+    static double factorSnapshotRelativeToAirWithMaterials(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(snapshot);
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(consumer);
+
+        return scan(null, snapshot, start.x, start.y, start.z, end.x, end.y, end.z, true, null, consumer);
+    }
+
+    public static double factorSnapshotWithMaterials(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, MaterialSegmentConsumer consumer) {
+        Objects.requireNonNull(snapshot);
+        Objects.requireNonNull(start);
+        Objects.requireNonNull(end);
+        Objects.requireNonNull(consumer);
+
+        return scan(null, snapshot, start.x, start.y, start.z, end.x, end.y, end.z, false, null, consumer);
+    }
+
     static double factorWithTraceAndMaterials(ServerLevel level, Vec3 start, Vec3 end, FrequencyMaterialPathCache.Trace trace, MaterialSegmentConsumer consumer) {
         Objects.requireNonNull(start);
         Objects.requireNonNull(end);
@@ -185,14 +219,23 @@ public final class FrequencyMaterialAttenuation {
     }
 
     private static double factor(ServerLevel level, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir, FrequencyMaterialPathCache.Trace trace, MaterialSegmentConsumer consumer) {
-        Objects.requireNonNull(level);
+        return scan(level, null, startX, startY, startZ, endX, endY, endZ, relativeToAir, trace, consumer);
+    }
+
+    private static double scan(ServerLevel level, FrequencyMaterialWorldSnapshot world, double startX, double startY, double startZ, double endX, double endY, double endZ, boolean relativeToAir, FrequencyMaterialPathCache.Trace trace, MaterialSegmentConsumer consumer) {
+        if (world == null) {
+            Objects.requireNonNull(level);
+        }
+
+        boolean active = world == null ? enabled : world.enabled();
+        double airLoss = world == null ? FrequencyMaterialRules.airLossDbPerMeter() : world.airLoss();
 
         TraversalStats stats = ACTIVE_STATS.get();
         if (stats != null) {
             stats.paths++;
         }
 
-        if (!enabled && consumer == null) {
+        if (!active && consumer == null) {
             return 1.0;
         }
 
@@ -220,8 +263,8 @@ public final class FrequencyMaterialAttenuation {
         int cachedChunkX = Integer.MIN_VALUE;
         int cachedChunkZ = Integer.MIN_VALUE;
 
-        ServerChunkCache chunkSource = level.getChunkSource();
-        ChunkLookupBatch chunkBatch = ACTIVE_CHUNK_BATCH.get();
+        ServerChunkCache chunkSource = world == null ? level.getChunkSource() : null;
+        ChunkLookupBatch chunkBatch = world == null ? ACTIVE_CHUNK_BATCH.get() : null;
         if (chunkBatch != null && (chunkBatch.depth == 0 || chunkBatch.level != level)) {
             chunkBatch = null;
         }
@@ -229,20 +272,23 @@ public final class FrequencyMaterialAttenuation {
         LevelChunk chunk = null;
         LevelChunkSection[] sections = null;
         LevelChunkSection section = null;
+        FrequencyMaterialWorldSnapshot.Chunk snapshotChunk = null;
+        FrequencyMaterialSectionSnapshot snapshotSection = null;
         FrequencyMaterialSectionCache materialCache = null;
+        boolean chunkAvailable = false;
 
         int cachedSectionY = Integer.MIN_VALUE;
         boolean emptySection = false;
         double uniformSectionLoss = Double.NaN;
-        boolean skipAirSections = FrequencyMaterialRules.canSkipAirSections();
+        boolean skipAirSections = world == null ? FrequencyMaterialRules.canSkipAirSections() : world.skipAir();
 
         double t = 0.0;
         double loss = 0.0;
         int enteredAxes = 0;
-        double airBaseline = relativeToAir ? FrequencyMaterialRules.decibelsPerMeter(Blocks.AIR.defaultBlockState()) : 0.0;
+        double airBaseline = !relativeToAir ? 0.0 : world == null ? FrequencyMaterialRules.decibelsPerMeter(Blocks.AIR.defaultBlockState()) : world.effectiveAirLoss();
 
-        int minY = level.getMinBuildHeight();
-        int maxY = level.getMaxBuildHeight();
+        int minY = world == null ? level.getMinBuildHeight() : world.minY();
+        int maxY = world == null ? level.getMaxBuildHeight() : world.maxY();
 
         BlockPos.MutableBlockPos pos = null;
 
@@ -257,16 +303,24 @@ public final class FrequencyMaterialAttenuation {
             if (chunkX != cachedChunkX || chunkZ != cachedChunkZ) {
                 cachedChunkX = chunkX;
                 cachedChunkZ = chunkZ;
-                chunk = chunkBatch == null ? chunkSource.getChunkNow(chunkX, chunkZ) : chunkBatch.get(chunkSource, chunkX, chunkZ);
-                sections = chunk == null ? null : chunk.getSections();
+                if (world == null) {
+                    chunk = chunkBatch == null ? chunkSource.getChunkNow(chunkX, chunkZ) : chunkBatch.get(chunkSource, chunkX, chunkZ);
+                    sections = chunk == null ? null : chunk.getSections();
+                    chunkAvailable = chunk != null;
+                } else {
+                    snapshotChunk = world.chunk(chunkX, chunkZ);
+                    chunkAvailable = snapshotChunk.loaded();
+                }
+
                 section = null;
+                snapshotSection = null;
                 materialCache = null;
                 cachedSectionY = Integer.MIN_VALUE;
                 emptySection = false;
                 uniformSectionLoss = Double.NaN;
             }
 
-            if (chunk == null) {
+            if (!chunkAvailable) {
                 if (stats != null) {
                     stats.unloadedChunks++;
                 }
@@ -328,16 +382,23 @@ public final class FrequencyMaterialAttenuation {
 
                 cachedSectionY = y >> 4;
                 int index = cachedSectionY - (minY >> 4);
-                section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
-                emptySection = skipAirSections && section != null && section.hasOnlyAir();
-                uniformSectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : Double.NaN;
-                materialCache = !emptySection && section instanceof FrequencyMaterialSectionAccess access ? access.spectra$materialSummary() : null;
+                if (world == null) {
+                    section = sections != null && index >= 0 && index < sections.length ? sections[index] : null;
+                    emptySection = skipAirSections && section != null && section.hasOnlyAir();
+                    materialCache = !emptySection && section instanceof FrequencyMaterialSectionAccess access ? access.spectra$materialSummary() : null;
+                } else {
+                    snapshotSection = snapshotChunk.section(index);
+                    emptySection = skipAirSections && snapshotChunk.onlyAir(index);
+                    materialCache = !emptySection && snapshotSection != null ? snapshotSection.summary() : null;
+                }
+
+                uniformSectionLoss = emptySection ? airLoss : Double.NaN;
                 if (trace != null) {
                     trace.observe(section, materialCache);
                 }
 
                 if (t == 0.0 && (((int) Math.floor(endX)) >> 4) == chunkX && (((int) Math.floor(endY)) >> 4) == cachedSectionY && (((int) Math.floor(endZ)) >> 4) == chunkZ) {
-                    double sectionLoss = emptySection ? FrequencyMaterialRules.airLossDbPerMeter() : materialCache == null ? Double.NaN : materialCache.sectionLoss();
+                    double sectionLoss = emptySection ? airLoss : materialCache == null ? Double.NaN : materialCache.sectionLoss();
                     if (Double.isFinite(sectionLoss)) {
                         ResourceLocation material = consumer == null ? null : emptySection ? FrequencyMaterialClassifier.AIR : materialCache.sectionMaterial();
                         if (consumer == null || material != null) {
@@ -353,7 +414,7 @@ public final class FrequencyMaterialAttenuation {
                                 consumer.acceptWithLoss(material, 0.0, 1.0, 0, sectionLoss);
                             }
 
-                            if (!enabled) {
+                            if (!active) {
                                 return 1.0;
                             }
 
@@ -498,46 +559,63 @@ public final class FrequencyMaterialAttenuation {
             if (y >= minY && y < maxY && next > t) {
                 double length = distance * (next - t);
                 if (emptySection) {
-                    loss = MaterialAttenuationMath.accumulateLoss(loss, FrequencyMaterialRules.airLossDbPerMeter() - airBaseline, length);
+                    loss = MaterialAttenuationMath.accumulateLoss(loss, airLoss - airBaseline, length);
 
                     if (consumer != null) {
                         if (stats != null) {
                             stats.materialSegments++;
                         }
-                        consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, FrequencyMaterialRules.airLossDbPerMeter());
+                        consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, airLoss);
                     }
                 } else {
-                    BlockState state;
-
                     if (stats != null) {
                         stats.blockReads++;
                     }
 
-                    if (section != null) {
-                        state = section.getBlockState(x & 15, y & 15, z & 15);
+                    double lossPerMeter;
+                    ResourceLocation material = null;
+
+                    if (world != null) {
+                        FrequencyMaterialSectionSnapshot.Cell cell = snapshotSection == null ? null : snapshotSection.cell(x & 15, y & 15, z & 15);
+
+                        lossPerMeter = cell == null ? world.effectiveAirLoss() : cell.lossDbPerMeter();
+                        if (consumer != null) {
+                            material = cell == null ? FrequencyMaterialClassifier.AIR : cell.material();
+                        }
                     } else {
-                        if (pos == null) {
-                            pos = BLOCK_LOOKUP_POS.get();
+                        BlockState state;
+
+                        if (section != null) {
+                            state = section.getBlockState(x & 15, y & 15, z & 15);
+                        } else {
+                            if (pos == null) {
+                                pos = BLOCK_LOOKUP_POS.get();
+                            }
+
+                            pos.set(x, y, z);
+                            state = chunk.getBlockState(pos);
                         }
 
-                        pos.set(x, y, z);
-                        state = chunk.getBlockState(pos);
+                        lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(state);
+
+                        if (consumer != null) {
+                            material = FrequencyMaterialClassifier.classify(state);
+                        }
                     }
 
-                    double lossPerMeter = FrequencyMaterialRules.decibelsPerMeter(state);
                     loss = MaterialAttenuationMath.accumulateLoss(loss, lossPerMeter - airBaseline, length);
-
                     if (consumer != null) {
                         if (stats != null) {
                             stats.materialSegments++;
                         }
-                        consumer.acceptWithLoss(FrequencyMaterialClassifier.classify(state), t, next, enteredAxes, lossPerMeter);
+
+                        consumer.acceptWithLoss(material, t, next, enteredAxes, lossPerMeter);
                     }
                 }
             }
 
             if (consumer != null && next > t && (y < minY || y >= maxY)) {
-                consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, FrequencyMaterialRules.airLossDbPerMeter());
+                consumer.acceptWithLoss(FrequencyMaterialClassifier.AIR, t, next, enteredAxes, airLoss);
             }
 
             t = next;
@@ -562,7 +640,7 @@ public final class FrequencyMaterialAttenuation {
             }
         }
 
-        if (!enabled) {
+        if (!active) {
             return 1.0;
         }
 
