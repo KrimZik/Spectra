@@ -1978,6 +1978,10 @@ public final class FrequencyEngine {
                 receptionSnapshotWorldNanos += captureTimings.worldNanos();
                 receptionDenseFastReceivers += captureTimings.fastReceivers();
                 receptionDenseFastPaths += captureTimings.fastPaths();
+
+                if (captureTimings.shipBlockedReceivers() > 0) {
+                    receptionDenseBlockedShipBatches++;
+                }
             }
 
             List<PreparedReception> group = List.copyOf(selected);
