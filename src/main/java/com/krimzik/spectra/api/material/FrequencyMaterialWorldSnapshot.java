@@ -204,7 +204,7 @@ public final class FrequencyMaterialWorldSnapshot {
             }
         }
 
-        public Builder includePath(Vec3 start, Vec3 end) {
+        Builder includeBounds(Vec3 start, Vec3 end) {
             requireServerThread();
             Objects.requireNonNull(start);
             Objects.requireNonNull(end);
@@ -234,58 +234,143 @@ public final class FrequencyMaterialWorldSnapshot {
 
             for (int cx = minChunkX; cx <= maxChunkX; cx++) {
                 for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
-                    long key = ChunkPos.asLong(cx, cz);
-
-                    MutableChunk chunk = chunks.get(key);
-                    if (chunk == null) {
-                        if (chunks.size() >= MAX_CHUNKS) {
-                            throw new IllegalArgumentException("Material snapshot chunk limit exceeded");
-                        }
-
-                        chunk = new MutableChunk(level.getChunkSource().getChunkNow(cx, cz));
-                        chunks.put(key, chunk);
-                    }
-
-                    if (chunk.source == null) {
-                        continue;
-                    }
-
-                    int first = Math.max(0, minSectionY - baseSectionY);
-                    int last = Math.min(chunk.sections.length - 1, maxSectionY - baseSectionY);
-
-                    for (int i = first; i <= last; i++) {
-                        if (chunk.captured[i] != null) {
-                            continue;
-                        }
-
-                        LevelChunkSection section = chunk.sections[i];
-
-                        if (section == null) {
-                            chunk.captured[i] = new Section(null, null, true);
-                            continue;
-                        }
-
-                        boolean onlyAir = section.hasOnlyAir();
-                        FrequencyMaterialSectionSnapshot snapshot = null;
-
-                        if (!onlyAir || !skipAir) {
-                            if (!(section instanceof FrequencyMaterialSectionAccess access)) {
-                                throw new IllegalStateException("Material snapshot Mixin unavailable");
-                            }
-
-                            snapshot = access.spectra$materialSnapshot(server);
-                        }
-
-                        chunk.captured[i] = new Section(section, snapshot, onlyAir);
-
-                        if (++capturedSections > MAX_SECTIONS) {
-                            throw new IllegalArgumentException("Material snapshot section limit exceeded");
-                        }
-                    }
+                    captureChunk(cx, cz, minSectionY, maxSectionY, baseSectionY);
                 }
             }
 
             return this;
+        }
+
+        private void captureChunk(int cx, int cz, int minSectionY, int maxSectionY, int baseSectionY) {
+            long key = ChunkPos.asLong(cx, cz);
+            MutableChunk chunk = chunks.get(key);
+
+            if (chunk == null) {
+                if (chunks.size() >= MAX_CHUNKS) {
+                    throw new IllegalArgumentException("Material snapshot chunk limit exceeded");
+                }
+
+                chunk = new MutableChunk(level.getChunkSource().getChunkNow(cx, cz));
+                chunks.put(key, chunk);
+            }
+
+            if (chunk.source == null) {
+                return;
+            }
+
+            int first = Math.max(0, minSectionY - baseSectionY);
+            int last = Math.min(chunk.sections.length - 1, maxSectionY - baseSectionY);
+
+            for (int i = first; i <= last; i++) {
+                if (chunk.captured[i] != null) {
+                    continue;
+                }
+
+                LevelChunkSection section = chunk.sections[i];
+
+                if (section == null) {
+                    chunk.captured[i] = new Section(null, null, true);
+                    continue;
+                }
+
+                boolean onlyAir = section.hasOnlyAir();
+                FrequencyMaterialSectionSnapshot snapshot = null;
+
+                if (!onlyAir || !skipAir) {
+                    if (!(section instanceof FrequencyMaterialSectionAccess access)) {
+                        throw new IllegalStateException("Material snapshot Mixin unavailable");
+                    }
+
+                    snapshot = access.spectra$materialSnapshot(server);
+                }
+
+                chunk.captured[i] = new Section(section, snapshot, onlyAir);
+
+                if (++capturedSections > MAX_SECTIONS) {
+                    throw new IllegalArgumentException("Material snapshot section limit exceeded");
+                }
+            }
+        }
+
+        public Builder includePath(Vec3 start, Vec3 end) {
+            requireServerThread();
+            Objects.requireNonNull(start);
+            Objects.requireNonNull(end);
+
+            if (!Double.isFinite(start.x) || !Double.isFinite(start.y) || !Double.isFinite(start.z) || !Double.isFinite(end.x) || !Double.isFinite(end.y) || !Double.isFinite(end.z)) {
+                throw new IllegalArgumentException("Nonfinite material path");
+            }
+
+            double dx = end.x - start.x;
+            double dz = end.z - start.z;
+
+            if (!Double.isFinite(dx) || !Double.isFinite(dz)) {
+                throw new IllegalArgumentException("Invalid material path");
+            }
+
+            int minX = (int) Math.floor(Math.min(start.x, end.x));
+            int maxX = (int) Math.floor(Math.max(start.x, end.x));
+            int minZ = (int) Math.floor(Math.min(start.z, end.z));
+            int maxZ = (int) Math.floor(Math.max(start.z, end.z));
+
+            int minChunkX = (minX - 1) >> 4;
+            int maxChunkX = (maxX + 1) >> 4;
+            int minChunkZ = (minZ - 1) >> 4;
+            int maxChunkZ = (maxZ + 1) >> 4;
+
+            int minSectionY = ((int) Math.floor(Math.min(start.y, end.y)) - 1) >> 4;
+            int maxSectionY = ((int) Math.floor(Math.max(start.y, end.y)) + 1) >> 4;
+            int baseSectionY = level.getMinBuildHeight() >> 4;
+
+            int cx = ((int) Math.floor(start.x)) >> 4;
+            int cz = ((int) Math.floor(start.z)) >> 4;
+
+            int endCx = ((int) Math.floor(end.x)) >> 4;
+            int endCz = ((int) Math.floor(end.z)) >> 4;
+
+            int stepX = Double.compare(dx, 0.0);
+            int stepZ = Double.compare(dz, 0.0);
+
+            double nextX = stepX > 0 ? (((long) cx + 1L) * 16.0 - start.x) / dx : stepX < 0 ? ((long) cx * 16.0 - start.x) / dx : Double.POSITIVE_INFINITY;
+            double nextZ = stepZ > 0 ? (((long) cz + 1L) * 16.0 - start.z) / dz : stepZ < 0 ? ((long) cz * 16.0 - start.z) / dz : Double.POSITIVE_INFINITY;
+
+            double deltaX = stepX == 0 ? Double.POSITIVE_INFINITY : 16.0 / Math.abs(dx);
+            double deltaZ = stepZ == 0 ? Double.POSITIVE_INFINITY : 16.0 / Math.abs(dz);
+
+            while (true) {
+                captureNearby(cx, cz, minChunkX, maxChunkX, minChunkZ, maxChunkZ, minSectionY, maxSectionY, baseSectionY);
+
+                double next = Math.min(nextX, nextZ);
+                if (!(next < 1.0)) {
+                    break;
+                }
+
+                if (nextX <= next) {
+                    cx += stepX;
+                    nextX += deltaX;
+                }
+
+                if (nextZ <= next) {
+                    cz += stepZ;
+                    nextZ += deltaZ;
+                }
+            }
+
+            captureNearby(endCx, endCz, minChunkX, maxChunkX, minChunkZ, maxChunkZ, minSectionY, maxSectionY, baseSectionY);
+            return this;
+        }
+
+        private void captureNearby(int cx, int cz, int minChunkX, int maxChunkX, int minChunkZ, int maxChunkZ, int minSectionY, int maxSectionY, int baseSectionY) {
+            int firstX = Math.max(minChunkX, cx - 1);
+            int lastX = Math.min(maxChunkX, cx + 1);
+            int firstZ = Math.max(minChunkZ, cz - 1);
+            int lastZ = Math.min(maxChunkZ, cz + 1);
+
+            for (int x = firstX; x <= lastX; x++) {
+                for (int z = firstZ; z <= lastZ; z++) {
+                    captureChunk(x, z, minSectionY, maxSectionY, baseSectionY);
+                }
+            }
         }
 
         public FrequencyMaterialWorldSnapshot build() {

@@ -56,6 +56,17 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
         assumeTrue(FrequencyMaterialConfig.workerThreads() > 0);
     }
 
+    private void submitFirstWorkerBatch() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+
+        while (engine.submittedReceptionBatchCount() == 0 && System.nanoTime() < deadline) {
+            engine.processCompletedReceptionBatches();
+            Thread.sleep(1);
+        }
+
+        assertTrue(engine.submittedReceptionBatchCount() > 0);
+    }
+
     private void drain() throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
 
@@ -110,6 +121,78 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
         drain();
 
         assertEquals(1025, callbacks.get());
+    }
+
+    @Test
+    void denseReceptionDetectsDeactivatedEmitter() throws Exception {
+        requireWorkers();
+        registerEmitters(1023);
+
+        TestEmitter changed = new TestEmitter(440.0);
+        engine.register(changed);
+
+        AtomicInteger callbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+
+            engine.scheduleReceptionInRange(receiver, 1.0, (emitter, signal, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        }
+
+        submitFirstWorkerBatch();
+        changed.emitting = false;
+        drain();
+
+        assertEquals(25 * 1023, callbacks.get());
+    }
+
+    @Test
+    void denseReceptionDetectsEmitterReplacement() throws Exception {
+        requireWorkers();
+
+        registerEmitters(1023);
+
+        TestEmitter removed = new TestEmitter(440.0);
+        var registration = engine.register(removed);
+
+        TestEmitter replacement = new TestEmitter(440.0);
+
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicInteger removedCallbacks = new AtomicInteger();
+        AtomicInteger replacementCallbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+
+            engine.scheduleReceptionInRange(
+                    receiver,
+                    1.0,
+                    (emitter, signal, distance, amplitude, travelTime) -> {
+                        callbacks.incrementAndGet();
+
+                        if (emitter == removed) {
+                            removedCallbacks.incrementAndGet();
+                        }
+
+                        if (emitter == replacement) {
+                            replacementCallbacks.incrementAndGet();
+                        }
+                    }
+            );
+        }
+
+        submitFirstWorkerBatch();
+
+        registration.close();
+        engine.register(replacement);
+
+        drain();
+
+        assertEquals(25 * 1024, callbacks.get());
+        assertEquals(0, removedCallbacks.get());
+        assertEquals(25, replacementCallbacks.get());
     }
 
     @Test

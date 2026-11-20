@@ -607,4 +607,187 @@ class FrequencyMaterialSnapshotTraversalTest {
 
         assertSnapshotMatchesLive(new Vec3(0.5, 64.5, 0.5), new Vec3(2.5, 64.5, 0.5), 6.0);
     }
+
+    @Test
+    void denseWorldCoveragePreservesEverySignalPath() {
+        PalettedContainer<BlockState> states = states();
+        states.set(4, 0, 3, Blocks.STONE.defaultBlockState());
+        states.set(8, 0, 3, Blocks.GLASS.defaultBlockState());
+        chunk(0, 0, states);
+
+        Vec3 emitterA = new Vec3(2.5, 64.5, 3.5);
+        Vec3 emitterB = new Vec3(7.5, 64.5, 3.5);
+        Vec3 receiverA = new Vec3(10.5, 64.5, 3.5);
+        Vec3 receiverB = new Vec3(11.5, 64.5, 3.5);
+
+        List<Vec3> emitters = new ArrayList<>(java.util.Collections.nCopies(39, emitterA));
+        emitters.add(emitterB);
+
+        List<FrequencySableReceptionSnapshot> snapshots = FrequencySableReceptionSnapshot.captureBatch(level, List.of(new FrequencySableReceptionSnapshot.BatchInput(receiverA, emitters, List.of()), new FrequencySableReceptionSnapshot.BatchInput(receiverB, emitters, List.of())));
+        assertEquals(2, snapshots.size());
+
+        assertEquals(FrequencyMaterialAttenuation.factor(level, emitterA, receiverA), snapshots.get(0).factor(0, 1000.0, false, null), 1.0e-12);
+        assertEquals(FrequencyMaterialAttenuation.factor(level, emitterB, receiverA), snapshots.get(0).factor(39, 1000.0, false, null), 1.0e-12);
+        assertEquals(FrequencyMaterialAttenuation.factor(level, emitterA, receiverB), snapshots.get(1).factor(0, 1000.0, false, null), 1.0e-12);
+        assertEquals(FrequencyMaterialAttenuation.factor(level, emitterB, receiverB), snapshots.get(1).factor(39, 1000.0, false, null), 1.0e-12);
+
+        assertTrue(snapshots.get(0).currentOnServer(List.of()));
+        assertTrue(snapshots.get(1).currentOnServer(List.of()));
+    }
+
+    @Test
+    void denseSableReceptionPreservesShipPropagation() {
+        PalettedContainer<BlockState> states = states();
+        states.set(1, 0, 0, Blocks.IRON_BLOCK.defaultBlockState());
+        chunk(0, 0, states);
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(8.0, 0.0, 0.0);
+
+        BoundingBox3d bounds = new BoundingBox3d(8.0, 64.0, 0.0, 11.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 emitter = new Vec3(8.5, 64.5, 0.5);
+        Vec3 receiver = new Vec3(10.5, 64.5, 0.5);
+
+        FrequencySableReceptionSnapshot snapshot = FrequencySableReceptionSnapshot.capture(level, receiver, java.util.Collections.nCopies(40, emitter), List.of(ship));
+
+        double expected = new MinecraftMaterialPropagation(level).factorForReception(emitter, receiver, List.of(ship));
+
+        assertEquals(expected, snapshot.factor(0, 1000.0, false, null), 1.0e-12);
+        assertEquals(expected, snapshot.factor(39, 1000.0, false, null), 1.0e-12);
+
+        assertTrue(snapshot.currentOnServer(List.of(ship)));
+    }
+
+    @Test
+    void sparseBatchCapturesPathCorridorsInsteadOfBoundingRectangle() {
+        Vec3 receiver = new Vec3(248.5, 64.5, 248.5);
+        Vec3 diagonal = new Vec3(8.5, 64.5, 8.5);
+        Vec3 straight = new Vec3(248.5, 64.5, 8.5);
+
+        FrequencySableReceptionSnapshot.captureBatch(level, List.of(new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(diagonal, straight), List.of())));
+
+        verify(source, atLeastOnce()).getChunkNow(0, 0);
+        verify(source, atLeastOnce()).getChunkNow(15, 0);
+        verify(source, atLeastOnce()).getChunkNow(15, 15);
+
+        verify(source, never()).getChunkNow(0, 15);
+    }
+
+    @Test
+    void exactChunkBoundaryCorridorRetainsAdjacentChunks() {
+        Vec3 start = new Vec3(16.0, 64.5, -16.0);
+        Vec3 end = new Vec3(16.0, 64.5, 112.0);
+
+        FrequencyMaterialWorldSnapshot snapshot = FrequencyMaterialWorldSnapshot.builder(level).includePath(start, end).build();
+
+        assertNotNull(snapshot.chunk(0, 0));
+        assertNotNull(snapshot.chunk(1, 0));
+        assertNotNull(snapshot.chunk(0, 5));
+        assertNotNull(snapshot.chunk(1, 5));
+
+        assertThrows(IllegalStateException.class, () -> snapshot.chunk(2, 5));
+    }
+
+    @Test
+    void sharedDenseBoundsMatchIndividualPathSnapshots() {
+        PalettedContainer<BlockState> first = states();
+        first.set(4, 0, 2, Blocks.STONE.defaultBlockState());
+        chunk(0, 0, first);
+
+        PalettedContainer<BlockState> second = states();
+        second.set(5, 0, 2, Blocks.IRON_BLOCK.defaultBlockState());
+        chunk(1, 0, second);
+
+        Vec3 emitterA = new Vec3(2.5, 64.5, 2.5);
+        Vec3 emitterB = new Vec3(22.5, 64.5, 2.5);
+        Vec3 receiverA = new Vec3(9.5, 64.5, 2.5);
+        Vec3 receiverB = new Vec3(27.5, 64.5, 2.5);
+
+        List<Vec3> emitters = List.of(emitterA, emitterB);
+
+        List<FrequencySableReceptionSnapshot.BatchInput> inputs = List.of(new FrequencySableReceptionSnapshot.BatchInput(receiverA, emitters, List.of()), new FrequencySableReceptionSnapshot.BatchInput(receiverB, emitters, List.of()));
+        List<FrequencySableReceptionSnapshot> baseline = FrequencySableReceptionSnapshot.captureBatch(level, inputs);
+        List<FrequencySableReceptionSnapshot> optimized = FrequencySableReceptionSnapshot.captureBatch(level, inputs, null, emitterA, emitterB);
+
+        for (int receiver = 0; receiver < inputs.size(); receiver++) {
+            for (int emitter = 0; emitter < emitters.size(); emitter++) {
+                assertEquals(baseline.get(receiver).factor(emitter, 1000.0, false, null), optimized.get(receiver).factor(emitter, 1000.0, false, null), 1.0e-12);
+            }
+
+            assertTrue(optimized.get(receiver).currentOnServer(List.of()));
+        }
+    }
+
+    @Test
+    void denseSnapshotSkipsNonIntersectingSableCandidate() {
+        PalettedContainer<BlockState> states = states();
+        states.set(4, 0, 0, Blocks.STONE.defaultBlockState());
+        chunk(0, 0, states);
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(40.0, 0.0, 40.0);
+
+        BoundingBox3d bounds = new BoundingBox3d(40.0, 64.0, 40.0, 44.0, 65.0, 44.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 first = new Vec3(0.5, 64.5, 0.5);
+        Vec3 second = new Vec3(2.5, 64.5, 0.5);
+        Vec3 receiver = new Vec3(7.5, 64.5, 0.5);
+
+        var input = new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(first, second), List.of(ship));
+        var baseline = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input)).getFirst();
+        var timings = new FrequencySableReceptionSnapshot.CaptureTimings();
+        var optimized = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input), timings, first, second).getFirst();
+
+        for (int i = 0; i < 2; i++) {
+            assertEquals(baseline.factor(i, 1000.0, false, null), optimized.factor(i, 1000.0, false, null), 1.0e-12);
+        }
+
+        assertEquals(1, timings.fastReceivers());
+        assertEquals(2, timings.fastPaths());
+        assertFalse(optimized.hasShipIntersections(0));
+        assertTrue(optimized.currentOnServer(List.of(ship)));
+
+        bounds.set(2.0, 64.0, 0.0, 5.0, 65.0, 1.0);
+
+        assertFalse(optimized.currentOnServer(List.of(ship)));
+    }
+
+    @Test
+    void denseSnapshotRetainsIntersectingSableCandidate() {
+        PalettedContainer<BlockState> states = states();
+        states.set(1, 0, 0, Blocks.IRON_BLOCK.defaultBlockState());
+        chunk(0, 0, states);
+
+        Pose3d pose = new Pose3d();
+        pose.position().set(8.0, 0.0, 0.0);
+
+        BoundingBox3d bounds = new BoundingBox3d(8.0, 64.0, 0.0, 11.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 emitter = new Vec3(8.5, 64.5, 0.5);
+        Vec3 receiver = new Vec3(10.5, 64.5, 0.5);
+
+        var input = new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(emitter), List.of(ship));
+        var baseline = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input)).getFirst();
+        var timings = new FrequencySableReceptionSnapshot.CaptureTimings();
+        var optimized = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input), timings, emitter, emitter).getFirst();
+
+        assertEquals(0, timings.fastReceivers());
+        assertEquals(1, timings.shipBlockedReceivers());
+        assertTrue(optimized.hasShipIntersections(0));
+
+        assertEquals(baseline.factor(0, 1000.0, false, null), optimized.factor(0, 1000.0, false, null), 1.0e-12);
+    }
 }

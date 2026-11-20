@@ -33,6 +33,7 @@ public final class FrequencyEngine {
     private long nextReceiverRefreshWarningTick;
 
     private final IdentityHashMap<FrequencyEmitter, Double> emitters = new IdentityHashMap<>();
+    private long emitterSetRevision;
     private final IdentityHashMap<FrequencyReceiver, ReceiverRegistration> receivers = new IdentityHashMap<>();
     private int subscribedReceiverCount;
     private final ReceiverSubscriptionIndex receiverSubscriptionIndex = new ReceiverSubscriptionIndex();
@@ -113,6 +114,15 @@ public final class FrequencyEngine {
     private long receptionSnapshotNanos;
     private long receptionSnapshotPathsNanos;
     private long receptionSnapshotWorldNanos;
+    private long receptionDenseBoundsNanos;
+    private long receptionInputBuildNanos;
+    private int receptionDenseEligibleBatches;
+    private int receptionDenseBlockedLiveBatches;
+    private int receptionDenseBlockedPartialBatches;
+    private int receptionDenseBlockedShipBatches;
+    private int receptionDenseBlockedRevisionBatches;
+    private long receptionDenseFastReceivers;
+    private long receptionDenseFastPaths;
     private long receptionValidationNanos;
     private long receptionMaterialValidationNanos;
     private long receptionEmitterValidationNanos;
@@ -141,7 +151,7 @@ public final class FrequencyEngine {
 
     private record ParallelCandidate(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position, double distanceSquared) {}
     private record ReceptionRequest(FrequencyReceiver receiver, ReceiverRegistration registration, double range, FrequencyReceptionConsumer consumer, int retries) {}
-    private record PreparedReception(ReceptionRequest request, Vec3 position, double frequency, double tolerance, boolean reflection, List<ParallelCandidate> candidates, List<? extends SubLevelAccess> ships) {}
+    private record PreparedReception(ReceptionRequest request, Vec3 position, double frequency, double tolerance, boolean reflection, List<ParallelCandidate> candidates, List<? extends SubLevelAccess> ships, long emitterSetRevision) {}
 
     private static final class ReceptionPathSamples {
         final LongAdder sampled = new LongAdder();
@@ -252,6 +262,7 @@ public final class FrequencyEngine {
                 Double frequency = emitters.remove(emitter);
                 if (frequency != null) {
                     removeFromIndex(emitter, frequency);
+                    emitterSetRevision++;
 
                     if (fixedEmitterPositions.remove(emitter) != null) {
                         fixedEmitterSpatialIndex.remove(emitter);
@@ -906,6 +917,7 @@ public final class FrequencyEngine {
 
         emitters.put(emitter, frequency);
         addToIndex(emitter, frequency);
+        emitterSetRevision++;
 
         if (ownerChunk != null) {
             chunkRegistrations.computeIfAbsent(ownerChunk, unused -> new HashSet<>()).add(registration);
@@ -1795,7 +1807,7 @@ public final class FrequencyEngine {
             boolean reflection = FrequencyMaterialConfig.reflectionEnabled();
             List<? extends SubLevelAccess> ships = reflection ? pathAttenuation.waveReceiverCandidates(position, request.range()) : pathAttenuation.receiverCandidates(position, request.range());
 
-            return new PreparedReception(request, position, frequency, tolerance, reflection, List.copyOf(candidates), List.copyOf(ships));
+            return new PreparedReception(request, position, frequency, tolerance, reflection, List.copyOf(candidates), List.copyOf(ships), emitterSetRevision);
         } finally {
             receptionPrepareNanos += System.nanoTime() - started;
         }
@@ -1817,6 +1829,58 @@ public final class FrequencyEngine {
         }
 
         lastReceptionDecision = "adaptive_synchronous";
+    }
+
+    private Vec3[] denseFixedEmitterBounds(List<PreparedReception> selected) {
+        int count = emitters.size();
+
+        if (selected.isEmpty() || count <= 32) {
+            return null;
+        }
+
+        if (fixedEmitterPositions.size() != count) {
+            receptionDenseBlockedLiveBatches++;
+            return null;
+        }
+
+        long revision = emitterSetRevision;
+        for (PreparedReception prepared : selected) {
+            if (prepared.emitterSetRevision() != revision) {
+                receptionDenseBlockedRevisionBatches++;
+                return null;
+            }
+
+            if (prepared.candidates().size() != count) {
+                receptionDenseBlockedPartialBatches++;
+                return null;
+            }
+        }
+
+        receptionDenseEligibleBatches++;
+
+        double minX = Double.POSITIVE_INFINITY;
+        double minY = Double.POSITIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY;
+        double maxY = Double.NEGATIVE_INFINITY;
+        double maxZ = Double.NEGATIVE_INFINITY;
+
+        for (ParallelCandidate candidate : selected.getFirst().candidates()) {
+            Vec3 position = candidate.position();
+
+            minX = Math.min(minX, position.x);
+            minY = Math.min(minY, position.y);
+            minZ = Math.min(minZ, position.z);
+
+            maxX = Math.max(maxX, position.x);
+            maxY = Math.max(maxY, position.y);
+            maxZ = Math.max(maxZ, position.z);
+        }
+
+        return new Vec3[]{
+                new Vec3(minX, minY, minZ),
+                new Vec3(maxX, maxY, maxZ)
+        };
     }
 
     private void dispatchReceptionBatches(long deadline) {
@@ -1873,6 +1937,11 @@ public final class FrequencyEngine {
                 continue;
             }
 
+            long boundsStart = System.nanoTime();
+            Vec3[] denseBounds = denseFixedEmitterBounds(selected);
+            receptionDenseBoundsNanos += System.nanoTime() - boundsStart;
+
+            long inputsStart = System.nanoTime();
             List<FrequencySableReceptionSnapshot.BatchInput> inputs = new ArrayList<>(selected.size());
 
             for (PreparedReception prepared : selected) {
@@ -1885,12 +1954,14 @@ public final class FrequencyEngine {
                 inputs.add(new FrequencySableReceptionSnapshot.BatchInput(prepared.position(), positions, prepared.ships()));
             }
 
+            receptionInputBuildNanos += System.nanoTime() - inputsStart;
+
             List<FrequencySableReceptionSnapshot> snapshots;
             FrequencySableReceptionSnapshot.CaptureTimings captureTimings = new FrequencySableReceptionSnapshot.CaptureTimings();
             long snapshotStart = System.nanoTime();
 
             try {
-                snapshots = FrequencySableReceptionSnapshot.captureBatch(level, inputs, captureTimings);
+                snapshots = FrequencySableReceptionSnapshot.captureBatch(level, inputs, captureTimings, denseBounds == null ? null : denseBounds[0], denseBounds == null ? null : denseBounds[1]);
             } catch (IllegalArgumentException | IllegalStateException exception) {
                 LOGGER.warn("Shared reception snapshot unavailable: {}", exception.toString());
 
@@ -1905,6 +1976,8 @@ public final class FrequencyEngine {
                 receptionSnapshotNanos += System.nanoTime() - snapshotStart;
                 receptionSnapshotPathsNanos += captureTimings.pathsNanos();
                 receptionSnapshotWorldNanos += captureTimings.worldNanos();
+                receptionDenseFastReceivers += captureTimings.fastReceivers();
+                receptionDenseFastPaths += captureTimings.fastPaths();
             }
 
             List<PreparedReception> group = List.copyOf(selected);
@@ -1962,6 +2035,32 @@ public final class FrequencyEngine {
         }
     }
 
+    private boolean denseReceptionEmittersCurrent(PreparedReception prepared) {
+        double minFrequency = prepared.frequency() - prepared.tolerance();
+        double maxFrequency = prepared.frequency() + prepared.tolerance();
+
+        for (ParallelCandidate captured : prepared.candidates()) {
+            FrequencyEmitter emitter = captured.emitter();
+            Double registeredFrequency = emitters.get(emitter);
+
+            if (registeredFrequency == null || registeredFrequency < minFrequency || registeredFrequency > maxFrequency || !emitter.isEmitting() || !captured.signal().equals(Objects.requireNonNull(emitter.signal()))) {
+                return false;
+            }
+
+            Vec3 position = fixedEmitterPositions.get(emitter);
+
+            if (position == null) {
+                position = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
+            }
+
+            if (!captured.position().equals(position)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private boolean receptionStillCurrent(PreparedReception prepared, FrequencySableReceptionSnapshot snapshot) {
         ReceptionRequest request = prepared.request();
         FrequencyReceiver receiver = request.receiver();
@@ -1982,6 +2081,14 @@ public final class FrequencyEngine {
         }
 
         long emitterStart = System.nanoTime();
+
+        if (prepared.candidates().size() == emitters.size()) {
+            try {
+                return denseReceptionEmittersCurrent(prepared);
+            } finally {
+                receptionEmitterValidationNanos += System.nanoTime() - emitterStart;
+            }
+        }
 
         boolean reuse = prepared.candidates().size() <= 2048 && !receptionValidationScratchBusy;
         IdentityHashMap<FrequencyEmitter, ParallelCandidate> remaining = reuse ? receptionValidationScratch : new IdentityHashMap<>(prepared.candidates().size());
@@ -2201,6 +2308,13 @@ public final class FrequencyEngine {
                 }
             }
         }
+    }
+
+    record DenseReceptionDiagnostics(int eligibleBatches, int blockedLive, int blockedPartial, int blockedShips, int blockedRevision, long fastReceivers, long fastPaths, double boundsMs, double inputsMs) {}
+    DenseReceptionDiagnostics denseReceptionDiagnostics() {
+        checkRunning();
+
+        return new DenseReceptionDiagnostics(receptionDenseEligibleBatches, receptionDenseBlockedLiveBatches, receptionDenseBlockedPartialBatches, receptionDenseBlockedShipBatches, receptionDenseBlockedRevisionBatches, receptionDenseFastReceivers, receptionDenseFastPaths, receptionDenseBoundsNanos * 1.0e-6, receptionInputBuildNanos * 1.0e-6);
     }
 
     record ReceptionTimings(double prepareMs, double snapshotMs, double validationMs, double deliveryMs, double synchronousMs, double workerThreadRunMs, double p95ActiveTickMs, double maxActiveTickMs, int activeTicks, int adaptiveSyncRequests, double materialValidationMs, double emitterValidationMs, double snapshotPathsMs, double snapshotWorldMs) {}

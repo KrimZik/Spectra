@@ -576,6 +576,9 @@ public final class SpectraProfileCommand {
             var stages = profile.engine.receptionTimings();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_STAGES prepareMs=%.3f snapshotMs=%.3f validationMs=%.3f deliveryMs=%.3f synchronousMs=%.3f workerThreadRunMs=%.3f p95ActiveTickMs=%.3f maxActiveTickMs=%.3f activeTicks=%d adaptiveSyncRequests=%d materialValidationMs=%.3f emitterValidationMs=%.3f", stages.prepareMs(), stages.snapshotMs(), stages.validationMs(), stages.deliveryMs(), stages.synchronousMs(), stages.workerThreadRunMs(), stages.p95ActiveTickMs(), stages.maxActiveTickMs(), stages.activeTicks(), stages.adaptiveSyncRequests(), stages.materialValidationMs(), stages.emitterValidationMs()));
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] SNAPSHOT_CAPTURE pathsMs=%.3f worldMs=%.3f otherMs=%.3f", stages.snapshotPathsMs(), stages.snapshotWorldMs(), Math.max(0.0, stages.snapshotMs() - stages.snapshotPathsMs() - stages.snapshotWorldMs())));
+
+            var dense = profile.engine.denseReceptionDiagnostics();
+            LOGGER.info("[SPECTRA-PROFILE] DENSE_SNAPSHOT eligibleBatches={} blockedLive={} blockedPartial={} blockedShips={} blockedRevision={} fastReceivers={} fastPaths={} boundsMs={} inputsMs={}", dense.eligibleBatches(), dense.blockedLive(), dense.blockedPartial(), dense.blockedShips(), dense.blockedRevision(), dense.fastReceivers(), dense.fastPaths(), String.format(Locale.ROOT, "%.3f", dense.boundsMs()), String.format(Locale.ROOT, "%.3f", dense.inputsMs()));
             LOGGER.info("[SPECTRA-PROFILE] SNAPSHOT_PATH_SAMPLES {}", profile.engine.receptionPathSamplesSummary());
 
             var scheduler = profile.engine.receptionSchedulerDiagnostics();

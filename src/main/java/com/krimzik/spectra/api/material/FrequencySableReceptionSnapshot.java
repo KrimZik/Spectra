@@ -20,7 +20,17 @@ public final class FrequencySableReceptionSnapshot {
     public static final class CaptureTimings {
         private long pathsNanos;
         private long worldNanos;
+        private long fastReceivers;
+        private long fastPaths;
+        private int shipBlockedReceivers;
 
+        public long fastReceivers() {
+            return fastReceivers;
+        }
+
+        public long fastPaths() {
+            return fastPaths;
+        }
         public long pathsNanos() {
             return pathsNanos;
         }
@@ -28,9 +38,19 @@ public final class FrequencySableReceptionSnapshot {
         public long worldNanos() {
             return worldNanos;
         }
+
+        public int shipBlockedReceivers() {
+            return shipBlockedReceivers;
+        }
     }
 
     private static final class Coverage {
+        private static final int MAX_SPARSE_RAYS = 32;
+        private record Ray(Vec3 start, Vec3 end) {}
+        private final List<Ray> rays = new ArrayList<>();
+        private long estimatedCorridorChunks;
+        private boolean dense;
+
         private double minX = Double.POSITIVE_INFINITY;
         private double minY = Double.POSITIVE_INFINITY;
         private double minZ = Double.POSITIVE_INFINITY;
@@ -38,28 +58,74 @@ public final class FrequencySableReceptionSnapshot {
         private double maxY = Double.NEGATIVE_INFINITY;
         private double maxZ = Double.NEGATIVE_INFINITY;
 
-        void include(Vec3 start, Vec3 end) {
-            minX = Math.min(minX, Math.min(start.x, end.x));
-            minY = Math.min(minY, Math.min(start.y, end.y));
-            minZ = Math.min(minZ, Math.min(start.z, end.z));
-
-            maxX = Math.max(maxX, Math.max(start.x, end.x));
-            maxY = Math.max(maxY, Math.max(start.y, end.y));
-            maxZ = Math.max(maxZ, Math.max(start.z, end.z));
-        }
-
         void include(Vec3 point) {
             minX = Math.min(minX, point.x);
             minY = Math.min(minY, point.y);
             minZ = Math.min(minZ, point.z);
+
             maxX = Math.max(maxX, point.x);
             maxY = Math.max(maxY, point.y);
             maxZ = Math.max(maxZ, point.z);
         }
 
+        void include(Vec3 start, Vec3 end) {
+            include(start);
+            include(end);
+
+            if (dense) {
+                return;
+            }
+
+            if (rays.size() >= MAX_SPARSE_RAYS) {
+                rays.clear();
+                dense = true;
+                return;
+            }
+
+            rays.add(new Ray(start, end));
+
+            int startX = ((int) Math.floor(start.x)) >> 4;
+            int startZ = ((int) Math.floor(start.z)) >> 4;
+            int endX = ((int) Math.floor(end.x)) >> 4;
+            int endZ = ((int) Math.floor(end.z)) >> 4;
+
+            long stepsX = Math.abs((long) endX - startX);
+            long stepsZ = Math.abs((long) endZ - startZ);
+
+            estimatedCorridorChunks += 4L * (stepsX + stepsZ + 1L);
+        }
+
+        void includeDenseBounds(Vec3 min, Vec3 max) {
+            minX = Math.min(minX, min.x);
+            minY = Math.min(minY, min.y);
+            minZ = Math.min(minZ, min.z);
+
+            maxX = Math.max(maxX, max.x);
+            maxY = Math.max(maxY, max.y);
+            maxZ = Math.max(maxZ, max.z);
+
+            dense = true;
+            rays.clear();
+        }
+
         void capture(FrequencyMaterialWorldSnapshot.Builder builder) {
-            if (minX != Double.POSITIVE_INFINITY) {
-                builder.includePath(new Vec3(minX, minY, minZ), new Vec3(maxX, maxY, maxZ));
+            if (minX == Double.POSITIVE_INFINITY) {
+                return;
+            }
+
+            int minChunkX = ((int) Math.floor(minX) - 1) >> 4;
+            int maxChunkX = ((int) Math.floor(maxX) + 1) >> 4;
+            int minChunkZ = ((int) Math.floor(minZ) - 1) >> 4;
+            int maxChunkZ = ((int) Math.floor(maxZ) + 1) >> 4;
+
+            long area = ((long) maxChunkX - minChunkX + 1L) * ((long) maxChunkZ - minChunkZ + 1L);
+
+            if (!dense && !rays.isEmpty() && estimatedCorridorChunks < area) {
+                for (Ray ray : rays) {
+                    builder.includePath(ray.start(), ray.end());
+                }
+            } else {
+                builder.includeBounds(new Vec3(minX, minY, minZ), new Vec3(maxX, maxY, maxZ));
             }
         }
     }
@@ -132,6 +198,10 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     public static List<FrequencySableReceptionSnapshot> captureBatch(ServerLevel level, List<BatchInput> inputs, CaptureTimings timings) {
+        return captureBatch(level, inputs, timings, null, null);
+    }
+
+    public static List<FrequencySableReceptionSnapshot> captureBatch(ServerLevel level, List<BatchInput> inputs, CaptureTimings timings, Vec3 sharedEmitterMin, Vec3 sharedEmitterMax) {
         Objects.requireNonNull(level);
         Objects.requireNonNull(inputs);
 
@@ -145,6 +215,16 @@ public final class FrequencySableReceptionSnapshot {
 
         long pathsStart = timings == null ? 0L : System.nanoTime();
         Coverage worldCoverage = new Coverage();
+
+        if ((sharedEmitterMin == null) != (sharedEmitterMax == null)) {
+            throw new IllegalArgumentException("Incomplete dense emitter bounds");
+        }
+
+        boolean sharedDenseBounds = sharedEmitterMin != null;
+        if (sharedDenseBounds) {
+            worldCoverage.includeDenseBounds(sharedEmitterMin, sharedEmitterMax);
+        }
+
         IdentityHashMap<Ship, Coverage> shipCoverage = new IdentityHashMap<>();
         IdentityHashMap<SubLevelAccess, Ship> copiedShips = new IdentityHashMap<>();
         List<CapturedPaths> captured = new ArrayList<>(inputs.size());
@@ -152,8 +232,17 @@ public final class FrequencySableReceptionSnapshot {
 
         for (BatchInput input : inputs) {
             Vec3 receiver = input.receiver();
-            if (!input.emitters().isEmpty()) {
-                worldCoverage.include(receiver);
+
+            if (sharedDenseBounds && input.candidates().isEmpty()) {
+                if (timings != null) {
+                    timings.fastReceivers++;
+                    timings.fastPaths += input.emitters().size();
+                }
+
+                worldCoverage.includeDenseBounds(receiver, receiver);
+
+                captured.add(new CapturedPaths(receiver, List.of(), List.of(), input.emitters()));
+                continue;
             }
 
             List<Ship> ships = new ArrayList<>(input.candidates().size());
@@ -169,10 +258,47 @@ public final class FrequencySableReceptionSnapshot {
                 ships.add(ship);
             }
 
-            List<Path> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
+            if (sharedDenseBounds && !ships.isEmpty()) {
+                double minX = Math.min(sharedEmitterMin.x, receiver.x);
+                double minY = Math.min(sharedEmitterMin.y, receiver.y);
+                double minZ = Math.min(sharedEmitterMin.z, receiver.z);
 
+                double maxX = Math.max(sharedEmitterMax.x, receiver.x);
+                double maxY = Math.max(sharedEmitterMax.y, receiver.y);
+                double maxZ = Math.max(sharedEmitterMax.z, receiver.z);
+
+                boolean intersectsCoverage = false;
+
+                for (Ship ship : ships) {
+                    BoundingBox3d bounds = ship.bounds();
+
+                    if (bounds.maxX() >= minX && bounds.minX() <= maxX && bounds.maxY() >= minY && bounds.minY() <= maxY && bounds.maxZ() >= minZ && bounds.minZ() <= maxZ) {
+                        intersectsCoverage = true;
+                        break;
+                    }
+                }
+
+                if (!intersectsCoverage) {
+                    if (timings != null) {
+                        timings.fastReceivers++;
+                        timings.fastPaths += input.emitters().size();
+                    }
+
+                    worldCoverage.includeDenseBounds(receiver, receiver);
+                    captured.add(new CapturedPaths(receiver, List.copyOf(ships), List.of(), input.emitters()));
+
+                    continue;
+                }
+
+                if (timings != null) {
+                    timings.shipBlockedReceivers++;
+                }
+            }
+
+            List<Path> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
             for (Vec3 start : input.emitters()) {
-                worldCoverage.include(start);
+                worldCoverage.include(start, receiver);
+
                 if (ships.isEmpty()) {
                     continue;
                 }
