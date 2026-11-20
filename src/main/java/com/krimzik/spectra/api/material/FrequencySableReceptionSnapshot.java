@@ -295,9 +295,15 @@ public final class FrequencySableReceptionSnapshot {
                 }
             }
 
+            if (sharedDenseBounds) {
+                worldCoverage.include(receiver);
+            }
+
             List<Path> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
             for (Vec3 start : input.emitters()) {
-                worldCoverage.include(start, receiver);
+                if (!sharedDenseBounds) {
+                    worldCoverage.include(start, receiver);
+                }
 
                 if (ships.isEmpty()) {
                     continue;

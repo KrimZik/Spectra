@@ -790,4 +790,28 @@ class FrequencyMaterialSnapshotTraversalTest {
 
         assertEquals(baseline.factor(0, 1000.0, false, null), optimized.factor(0, 1000.0, false, null), 1.0e-12);
     }
+
+    @Test
+    void denseSableCaptureIncludesReceiverOutsideEmitterBounds() {
+        chunk(0, 0, states());
+        chunk(1, 0, states());
+        chunk(2, 0, states());
+
+        Pose3d pose = new Pose3d();
+        BoundingBox3d bounds = new BoundingBox3d(17.0, 64.0, 0.0, 20.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 emitter = new Vec3(2.5, 64.5, 0.5);
+        Vec3 receiver = new Vec3(40.5, 64.5, 0.5);
+
+        var input = new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(emitter), List.of(ship));
+        var baseline = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input)).getFirst();
+        var optimized = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input), new FrequencySableReceptionSnapshot.CaptureTimings(), emitter, emitter).getFirst();
+
+        assertTrue(optimized.hasShipIntersections(0));
+        assertEquals(baseline.factor(0, 1000.0, false, null), optimized.factor(0, 1000.0, false, null), 1.0e-12);
+    }
 }
