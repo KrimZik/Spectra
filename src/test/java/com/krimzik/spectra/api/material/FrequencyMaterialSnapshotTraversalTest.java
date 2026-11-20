@@ -814,4 +814,66 @@ class FrequencyMaterialSnapshotTraversalTest {
         assertTrue(optimized.hasShipIntersections(0));
         assertEquals(baseline.factor(0, 1000.0, false, null), optimized.factor(0, 1000.0, false, null), 1.0e-12);
     }
+
+    @Test
+    void mixedSableHitsAndMissesPreserveMaterialAndReflection() {
+        PalettedContainer<BlockState> states = states();
+        states.set(5, 0, 0, Blocks.IRON_BLOCK.defaultBlockState());
+        chunk(0, 0, states);
+
+        Pose3d pose = new Pose3d();
+        BoundingBox3d bounds = new BoundingBox3d(4.0, 64.0, 0.0, 6.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 receiver = new Vec3(8.5, 64.5, 0.5);
+        Vec3 hit = new Vec3(0.5, 64.5, 0.5);
+        Vec3 miss = new Vec3(8.5, 64.5, 5.5);
+
+        List<Vec3> emitters = List.of(miss, hit, miss);
+
+        MinecraftMaterialPropagation propagation = new MinecraftMaterialPropagation(level);
+        MinecraftCombinedWavePath wave = new MinecraftCombinedWavePath(propagation, new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 3.0, 0.0)), List.of()));
+
+        double frequency = 915_000_000.0;
+        FrequencySableReceptionSnapshot snapshot = FrequencySableReceptionSnapshot.capture(level, receiver, emitters, List.of(ship));
+
+        for (int i = 0; i < emitters.size(); i++) {
+            Vec3 emitter = emitters.get(i);
+
+            assertEquals(i == 1, snapshot.hasShipIntersections(i));
+            assertEquals(propagation.factorForReception(emitter, receiver, List.of(ship)), snapshot.factor(i, frequency, false, wave), 1.0e-12);
+            assertEquals(wave.evaluate(emitter, receiver, List.of(ship), frequency, true), snapshot.factor(i, frequency, true, wave), 1.0e-12);
+        }
+
+        assertTrue(snapshot.currentOnServer(List.of(ship)));
+    }
+
+    @Test
+    void mixedSablePathsSurviveLargeCoverageFallback() {
+        chunk(0, 0, states());
+
+        Pose3d pose = new Pose3d();
+        BoundingBox3d bounds = new BoundingBox3d(4.0, 64.0, 0.0, 6.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 receiver = new Vec3(8.5, 64.5, 0.5);
+        Vec3 hit = new Vec3(0.5, 64.5, 0.5);
+        Vec3 miss = new Vec3(800.5, 64.5, 800.5);
+
+        var input = new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(hit, miss), List.of(ship));
+
+        FrequencySableReceptionSnapshot snapshot = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input), null, hit, miss).getFirst();
+
+        assertTrue(snapshot.hasShipIntersections(0));
+        assertFalse(snapshot.hasShipIntersections(1));
+
+        assertDoesNotThrow(() -> snapshot.factor(0, 1000.0, false, null));
+        assertDoesNotThrow(() -> snapshot.factor(1, 1000.0, false, null));
+    }
 }

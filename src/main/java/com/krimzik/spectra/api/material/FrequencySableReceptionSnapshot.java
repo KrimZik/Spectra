@@ -138,7 +138,7 @@ public final class FrequencySableReceptionSnapshot {
         }
     }
 
-    private record CapturedPaths(Vec3 receiver, List<Ship> ships, List<Path> paths, List<Vec3> emitters) {}
+    private record CapturedPaths(Vec3 receiver, List<Ship> ships, List<List<Span>> paths, List<Vec3> emitters) {}
 
     private record Ship(SubLevelAccess source, Pose3d pose, BoundingBox3d bounds) {
         boolean current() {
@@ -156,7 +156,6 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     private record Span(Vec3 from, Vec3 to, double enter, double exit, double worldMeters, double localMeters, boolean scaled) {}
-    private record Path(Vec3 start, List<Span> ships) {}
 
     private static final class OverlayWorkspace implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
         final MaterialPathOverlay overlay = new MaterialPathOverlay();
@@ -178,10 +177,10 @@ public final class FrequencySableReceptionSnapshot {
     private final FrequencyMaterialWorldSnapshot world;
     private final Vec3 receiver;
     private final List<Ship> ships;
-    private final List<Path> paths;
+    private final List<List<Span>> paths;
     private final List<Vec3> emitters;
 
-    private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<Path> paths, List<Vec3> emitters) {
+    private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<List<Span>> paths, List<Vec3> emitters) {
         this.world = world;
         this.receiver = receiver;
         this.ships = List.copyOf(ships);
@@ -299,7 +298,8 @@ public final class FrequencySableReceptionSnapshot {
                 worldCoverage.include(receiver);
             }
 
-            List<Path> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
+            List<List<Span>> paths = ships.isEmpty() ? List.of() : new ArrayList<>(input.emitters().size());
+
             for (Vec3 start : input.emitters()) {
                 if (!sharedDenseBounds) {
                     worldCoverage.include(start, receiver);
@@ -312,9 +312,10 @@ public final class FrequencySableReceptionSnapshot {
                 double dx = receiver.x - start.x;
                 double dy = receiver.y - start.y;
                 double dz = receiver.z - start.z;
-                double distance = start.distanceTo(receiver);
 
+                double distance = 0.0;
                 List<Span> spans = null;
+
                 for (Ship ship : ships) {
                     BoundingBox3d bounds = ship.bounds();
 
@@ -333,17 +334,19 @@ public final class FrequencySableReceptionSnapshot {
                     Vec3 localEnd = pose.transformPositionInverse(clippedEnd);
 
                     shipCoverage.computeIfAbsent(ship, ignored -> new Coverage()).include(localStart, localEnd);
+
                     var scale = pose.scale();
                     boolean scaled = scale.x() != 1.0 || scale.y() != 1.0 || scale.z() != 1.0;
 
                     if (spans == null) {
                         spans = new ArrayList<>();
+                        distance = start.distanceTo(receiver);
                     }
 
                     spans.add(new Span(localStart, localEnd, enter, exit, distance * (exit - enter), localStart.distanceTo(localEnd), scaled));
                 }
 
-                paths.add(new Path(start, spans == null ? List.of() : List.copyOf(spans)));
+                paths.add(spans == null ? List.of() : List.copyOf(spans));
             }
 
             captured.add(new CapturedPaths(receiver, List.copyOf(ships), List.copyOf(paths), input.emitters()));
@@ -370,11 +373,13 @@ public final class FrequencySableReceptionSnapshot {
                     for (Vec3 start : entry.emitters()) {
                         builder.includePath(start, entry.receiver());
                     }
+                    continue;
                 }
-                for (Path path : entry.paths()) {
-                    builder.includePath(path.start(), entry.receiver());
 
-                    for (Span span : path.ships()) {
+                for (int i = 0; i < entry.paths().size(); i++) {
+                    builder.includePath(entry.emitters().get(i), entry.receiver());
+
+                    for (Span span : entry.paths().get(i)) {
                         builder.includePath(span.from(), span.to());
                     }
                 }
@@ -396,26 +401,22 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     public boolean hasShipIntersections(int index) {
-        return !paths.isEmpty() && !paths.get(index).ships().isEmpty();
+        return !paths.isEmpty() && !paths.get(index).isEmpty();
     }
 
     public double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
-        if (paths.isEmpty()) {
-            Vec3 start = emitters.get(index);
+        Vec3 start = emitters.get(index);
+
+        if (paths.isEmpty() || paths.get(index).isEmpty()) {
             return reflection ? wave.factorSnapshot(world, start, receiver, frequencyHz) : FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
         }
 
-        Path path = paths.get(index);
-        if (path.ships().isEmpty()) {
-            return reflection ? wave.factorSnapshot(world, path.start(), receiver, frequencyHz) : FrequencyMaterialAttenuation.factorSnapshot(world, path.start(), receiver);
-        }
-
+        List<Span> spans = paths.get(index);
         if (!reflection) {
-            double result = FrequencyMaterialAttenuation.factorSnapshot(world, path.start(), receiver);
+            double result = FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
 
-            for (Span span : path.ships()) {
+            for (Span span : spans) {
                 double ship = FrequencyMaterialAttenuation.factorSnapshotRelativeToAir(world, span.from(), span.to());
-
                 if (span.scaled() && span.localMeters() > 0.0 && Double.isFinite(span.localMeters()) && Double.isFinite(span.worldMeters())) {
                     ship = MaterialAttenuationMath.scaledFactor(ship, span.worldMeters(), span.localMeters());
                 }
@@ -429,12 +430,12 @@ public final class FrequencySableReceptionSnapshot {
         OverlayWorkspace workspace = OVERLAYS.get();
         workspace.overlay.reset();
 
-        double worldFactor = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(world, path.start(), receiver, workspace.overlay);
+        double worldFactor = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(world, start, receiver, workspace.overlay);
         if (!Double.isFinite(worldFactor)) {
             return Double.NaN;
         }
 
-        for (Span span : path.ships()) {
+        for (Span span : spans) {
             workspace.enter = span.enter();
             workspace.span = span.exit() - span.enter();
 
@@ -444,7 +445,7 @@ public final class FrequencySableReceptionSnapshot {
             }
         }
 
-        return wave.factorSnapshotCombined(workspace.overlay, path.start().distanceTo(receiver), frequencyHz, world.enabled());
+        return wave.factorSnapshotCombined(workspace.overlay, start.distanceTo(receiver), frequencyHz, world.enabled());
     }
 
     boolean sharesWorldSnapshotWith(FrequencySableReceptionSnapshot other) {
