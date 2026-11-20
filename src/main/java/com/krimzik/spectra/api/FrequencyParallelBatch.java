@@ -64,6 +64,9 @@ final class FrequencyParallelBatch {
         private final AtomicInteger remaining = new AtomicInteger();
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
         private final AtomicLong workerRunNanos = new AtomicLong();
+        private final long submittedNanos = System.nanoTime();
+        private final AtomicLong firstRunNanos = new AtomicLong(Long.MAX_VALUE);
+        private volatile long completedNanos;
 
         private volatile boolean schedulingFinished;
         private volatile boolean complete;
@@ -76,6 +79,7 @@ final class FrequencyParallelBatch {
 
         private void run() {
             long started = System.nanoTime();
+            firstRunNanos.accumulateAndGet(started, Math::min);
 
             try {
                 while (!cancelled && failure.get() == null && !Thread.currentThread().isInterrupted()) {
@@ -97,9 +101,11 @@ final class FrequencyParallelBatch {
             } catch (Throwable exception) {
                 failure.compareAndSet(null, exception);
             } finally {
-                workerRunNanos.addAndGet(System.nanoTime() - started);
+                long finished = System.nanoTime();
+                workerRunNanos.addAndGet(finished - started);
 
                 if (remaining.decrementAndGet() == 0 && schedulingFinished) {
+                    completedNanos = finished;
                     complete = true;
                 }
             }
@@ -109,6 +115,7 @@ final class FrequencyParallelBatch {
             schedulingFinished = true;
 
             if (remaining.get() == 0) {
+                completedNanos = System.nanoTime();
                 complete = true;
             }
         }
@@ -119,6 +126,18 @@ final class FrequencyParallelBatch {
 
         long workerRunNanos() {
             return workerRunNanos.get();
+        }
+
+        long submittedNanos() {
+            return submittedNanos;
+        }
+
+        long firstRunNanos() {
+            return firstRunNanos.get();
+        }
+
+        long completedNanos() {
+            return completedNanos;
         }
 
         double[] results() {

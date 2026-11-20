@@ -92,9 +92,9 @@ public final class FrequencyEngine {
     private int activeQueries;
 
     private static final int MIN_PARALLEL_RECEPTION = 1024;
-    private static final int MAX_GROUP_ITEMS = 8192;
+    private static final int MAX_GROUP_ITEMS = 16384; //8192
     private static final int MAX_GROUP_RECEIVERS = 64;
-    private static final int MAX_IN_FLIGHT_RECEPTION = 4;
+    private static final int MAX_IN_FLIGHT_RECEPTION = 8; //4
     private static final int MAX_QUEUED_RECEPTION = 16384;
     private static final int MAX_RECEPTION_RETRIES = 2;
     private static final long RECEPTION_TICK_BUDGET_NS = 2_000_000L;
@@ -131,6 +131,12 @@ public final class FrequencyEngine {
     private long receptionDeliveryNanos;
     private long receptionSyncNanos;
     private long receptionWorkerNanos;
+    private long receptionBatchQueueNanos;
+    private long receptionBatchComputeNanos;
+    private long receptionBatchReadyNanos;
+    private long receptionBatchLatencyNanos;
+    private long receptionBatchMaxReadyNanos;
+    private int receptionBatchProfileCount;
     private ReceptionPathSamples receptionPathSamples;
     private ReceptionWorkerSamples receptionWorkerSamples;
 
@@ -2241,6 +2247,26 @@ public final class FrequencyEngine {
                     try {
                         batch.results = batch.job.results();
                         receptionWorkerNanos += batch.job.workerRunNanos();
+
+                        if (receptionWorkerSamples != null) {
+                            long collected = System.nanoTime();
+                            long submitted = batch.job.submittedNanos();
+                            long started = batch.job.firstRunNanos();
+                            long completed = batch.job.completedNanos();
+
+                            if (started != Long.MAX_VALUE && completed >= started) {
+                                long queued = Math.max(0L, started - submitted);
+                                long computing = completed - started;
+                                long ready = Math.max(0L, collected - completed);
+
+                                receptionBatchQueueNanos += queued;
+                                receptionBatchComputeNanos += computing;
+                                receptionBatchReadyNanos += ready;
+                                receptionBatchLatencyNanos += Math.max(0L, collected - submitted);
+                                receptionBatchMaxReadyNanos = Math.max(receptionBatchMaxReadyNanos, ready);
+                                receptionBatchProfileCount++;
+                            }
+                        }
                     } catch (RuntimeException exception) {
                         LOGGER.warn("Parallel reception failed; scheduling retries", exception);
                         activeReception.removeFirst();
@@ -2399,6 +2425,15 @@ public final class FrequencyEngine {
     String receptionPathSamplesSummary() {
         checkRunning();
         return receptionPathSamples == null ? "disabled" : receptionPathSamples.summary();
+    }
+
+    String receptionWorkerPipelineSummary() {
+        checkRunning();
+
+        double inverse = 1.0e-6 / Math.max(1, receptionBatchProfileCount);
+        double parallelism = receptionWorkerNanos / (double) Math.max(1L, receptionBatchComputeNanos);
+
+        return String.format(Locale.ROOT, "batches=%d avgQueueMs=%.3f avgComputeSpanMs=%.3f avgReadyWaitMs=%.3f avgBatchLatencyMs=%.3f maxReadyWaitMs=%.3f effectiveWorkersPerBatch=%.2f", receptionBatchProfileCount, receptionBatchQueueNanos * inverse, receptionBatchComputeNanos * inverse, receptionBatchReadyNanos * inverse, receptionBatchLatencyNanos * inverse, receptionBatchMaxReadyNanos * 1.0e-6, parallelism);
     }
 
     String receptionWorkerSamplesSummary() {
