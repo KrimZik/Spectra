@@ -157,6 +157,14 @@ public final class FrequencySableReceptionSnapshot {
 
     private record Span(Vec3 from, Vec3 to, double enter, double exit, double worldMeters, double localMeters, boolean scaled) {}
 
+    public record WorkerSample(double factor, boolean shipHit, long totalNanos, long worldNanos, long shipNanos, long waveNanos) {}
+
+    static final class SampleTimings {
+        long worldNanos;
+        long shipNanos;
+        long waveNanos;
+    }
+
     private static final class OverlayWorkspace implements FrequencyMaterialAttenuation.MaterialSegmentConsumer {
         final MaterialPathOverlay overlay = new MaterialPathOverlay();
         double enter;
@@ -404,24 +412,61 @@ public final class FrequencySableReceptionSnapshot {
         return !paths.isEmpty() && !paths.get(index).isEmpty();
     }
 
+    public WorkerSample sampleFactor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
+        SampleTimings timings = new SampleTimings();
+        boolean shipHit = hasShipIntersections(index);
+
+        long started = System.nanoTime();
+        double result = factor(index, frequencyHz, reflection, wave, timings);
+        long totalNanos = System.nanoTime() - started;
+
+        return new WorkerSample(result, shipHit, totalNanos, timings.worldNanos, timings.shipNanos, timings.waveNanos);
+    }
+
     public double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
+        return factor(index, frequencyHz, reflection, wave, null);
+    }
+
+    private double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave, SampleTimings timings) {
         Vec3 start = emitters.get(index);
 
         if (paths.isEmpty() || paths.get(index).isEmpty()) {
-            return reflection ? wave.factorSnapshot(world, start, receiver, frequencyHz) : FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
+            if (reflection) {
+                return timings == null ? wave.factorSnapshot(world, start, receiver, frequencyHz) : wave.factorSnapshotProfiled(world, start, receiver, frequencyHz, timings);
+            }
+
+            long started = timings == null ? 0L : System.nanoTime();
+            double result = FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
+
+            if (timings != null) {
+                timings.worldNanos += System.nanoTime() - started;
+            }
+
+            return result;
         }
 
         List<Span> spans = paths.get(index);
         if (!reflection) {
+            long started = timings == null ? 0L : System.nanoTime();
             double result = FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);
 
+            if (timings != null) {
+                timings.worldNanos += System.nanoTime() - started;
+            }
+
             for (Span span : spans) {
+                long shipStarted = timings == null ? 0L : System.nanoTime();
+
                 double ship = FrequencyMaterialAttenuation.factorSnapshotRelativeToAir(world, span.from(), span.to());
                 if (span.scaled() && span.localMeters() > 0.0 && Double.isFinite(span.localMeters()) && Double.isFinite(span.worldMeters())) {
                     ship = MaterialAttenuationMath.scaledFactor(ship, span.worldMeters(), span.localMeters());
                 }
 
                 result *= ship;
+
+                if (timings != null) {
+                    timings.shipNanos += System.nanoTime() - shipStarted;
+                }
             }
 
             return result;
@@ -430,7 +475,13 @@ public final class FrequencySableReceptionSnapshot {
         OverlayWorkspace workspace = OVERLAYS.get();
         workspace.overlay.reset();
 
+        long started = timings == null ? 0L : System.nanoTime();
         double worldFactor = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(world, start, receiver, workspace.overlay);
+
+        if (timings != null) {
+            timings.worldNanos += System.nanoTime() - started;
+        }
+
         if (!Double.isFinite(worldFactor)) {
             return Double.NaN;
         }
@@ -439,13 +490,26 @@ public final class FrequencySableReceptionSnapshot {
             workspace.enter = span.enter();
             workspace.span = span.exit() - span.enter();
 
+            long shipStarted = timings == null ? 0L : System.nanoTime();
             double shipFactor = FrequencyMaterialAttenuation.factorSnapshotRelativeToAirWithMaterials(world, span.from(), span.to(), workspace);
+
+            if (timings != null) {
+                timings.shipNanos += System.nanoTime() - shipStarted;
+            }
+
             if (!Double.isFinite(shipFactor)) {
                 return Double.NaN;
             }
         }
 
-        return wave.factorSnapshotCombined(workspace.overlay, start.distanceTo(receiver), frequencyHz, world.enabled());
+        long waveStarted = timings == null ? 0L : System.nanoTime();
+        double result = wave.factorSnapshotCombined(workspace.overlay, start.distanceTo(receiver), frequencyHz, world.enabled());
+
+        if (timings != null) {
+            timings.waveNanos += System.nanoTime() - waveStarted;
+        }
+
+        return result;
     }
 
     boolean sharesWorldSnapshotWith(FrequencySableReceptionSnapshot other) {

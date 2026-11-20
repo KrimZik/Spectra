@@ -112,6 +112,7 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
 
         MinecraftWaveMediumResolver resolver;
         ResourceLocation previous;
+        WaveMedium previousMedium;
         double frequencyHz;
         boolean busy;
 
@@ -120,13 +121,18 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
             this.resolver = resolver;
             this.frequencyHz = frequencyHz;
             previous = null;
+            previousMedium = null;
             boundaries.reset();
         }
 
         @Override
         public void accept(ResourceLocation material, double startFraction, double endFraction, int enteredAxes) {
             if (previous != null && !previous.equals(material)) {
-                boundaries.crossNormal(resolver.resolveMaterial(previous, frequencyHz), resolver.resolveMaterial(material, frequencyHz), true);
+                WaveMedium from = previousMedium == null ? resolver.resolveMaterial(previous, frequencyHz) : previousMedium;
+                WaveMedium to = resolver.resolveMaterial(material, frequencyHz);
+
+                boundaries.crossNormal(from, to, true);
+                previousMedium = to;
             }
 
             previous = material;
@@ -134,6 +140,7 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
 
         void end() {
             previous = null;
+            previousMedium = null;
             resolver = null;
             busy = false;
         }
@@ -151,6 +158,33 @@ public final class MinecraftCombinedWavePath implements FrequencyMaterialAttenua
         try {
             double attenuation = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, start, end, workspace);
             return Double.isFinite(attenuation) ? attenuation * workspace.boundaries.directAmplitudeFactor() : Double.NaN;
+        } finally {
+            workspace.end();
+        }
+    }
+
+    double factorSnapshotProfiled(FrequencyMaterialWorldSnapshot snapshot, Vec3 start, Vec3 end, double frequencyHz, FrequencySableReceptionSnapshot.SampleTimings timings) {
+        SnapshotWorkspace workspace = snapshotWorkspaces.get();
+
+        if (workspace.busy) {
+            workspace = new SnapshotWorkspace();
+        }
+
+        workspace.begin(resolver, frequencyHz);
+
+        try {
+            long worldStarted = System.nanoTime();
+
+            double attenuation = FrequencyMaterialAttenuation.factorSnapshotWithMaterials(snapshot, start, end, workspace);
+
+            timings.worldNanos += System.nanoTime() - worldStarted;
+
+            long waveStarted = System.nanoTime();
+            double result = Double.isFinite(attenuation) ? attenuation * workspace.boundaries.directAmplitudeFactor() : Double.NaN;
+
+            timings.waveNanos += System.nanoTime() - waveStarted;
+
+            return result;
         } finally {
             workspace.end();
         }

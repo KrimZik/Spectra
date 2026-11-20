@@ -294,7 +294,7 @@ public final class FrequencyMaterialAttenuation {
         double dx = endX - startX;
         double dy = endY - startY;
         double dz = endZ - startZ;
-        double distance = Math.hypot(Math.hypot(dx, dy), dz);
+        double distance = MaterialAttenuationMath.distanceMeters(dx, dy, dz);
 
         if (!(distance > 0.0) || !Double.isFinite(distance)) {
             return 1.0;

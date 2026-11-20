@@ -580,6 +580,7 @@ public final class SpectraProfileCommand {
             var dense = profile.engine.denseReceptionDiagnostics();
             LOGGER.info("[SPECTRA-PROFILE] DENSE_SNAPSHOT eligibleBatches={} blockedLive={} blockedPartial={} blockedShips={} blockedRevision={} fastReceivers={} fastPaths={} boundsMs={} inputsMs={}", dense.eligibleBatches(), dense.blockedLive(), dense.blockedPartial(), dense.blockedShips(), dense.blockedRevision(), dense.fastReceivers(), dense.fastPaths(), String.format(Locale.ROOT, "%.3f", dense.boundsMs()), String.format(Locale.ROOT, "%.3f", dense.inputsMs()));
             LOGGER.info("[SPECTRA-PROFILE] SNAPSHOT_PATH_SAMPLES {}", profile.engine.receptionPathSamplesSummary());
+            LOGGER.info("[SPECTRA-PROFILE] WORKER_SAMPLES {}", profile.engine.receptionWorkerSamplesSummary());
 
             var scheduler = profile.engine.receptionSchedulerDiagnostics();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_SCHEDULER headBlockedTicks=%d readyBehindHeadTicks=%d peakReadyBehindHead=%d overBudgetTicks=%d worstTickPrepareMs=%.3f worstTickSnapshotMs=%.3f worstTickValidationMs=%.3f worstTickDeliveryMs=%.3f worstTickSyncMs=%.3f worstTickOtherMs=%.3f", scheduler.headBlockedTicks(), scheduler.readyBehindHeadTicks(), scheduler.peakReadyBehindHead(), scheduler.overBudgetTicks(), scheduler.worstTickPrepareMs(), scheduler.worstTickSnapshotMs(), scheduler.worstTickValidationMs(), scheduler.worstTickDeliveryMs(), scheduler.worstTickSyncMs(), scheduler.worstTickOtherMs()));

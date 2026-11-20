@@ -132,6 +132,7 @@ public final class FrequencyEngine {
     private long receptionSyncNanos;
     private long receptionWorkerNanos;
     private ReceptionPathSamples receptionPathSamples;
+    private ReceptionWorkerSamples receptionWorkerSamples;
 
     private final long[] receptionActiveTickNanos = new long[256];
     private int receptionActiveTickCount;
@@ -152,6 +153,46 @@ public final class FrequencyEngine {
     private record ParallelCandidate(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position, double distanceSquared) {}
     private record ReceptionRequest(FrequencyReceiver receiver, ReceiverRegistration registration, double range, FrequencyReceptionConsumer consumer, int retries) {}
     private record PreparedReception(ReceptionRequest request, Vec3 position, double frequency, double tolerance, boolean reflection, List<ParallelCandidate> candidates, List<? extends SubLevelAccess> ships, long emitterSetRevision) {}
+
+    private static final class ReceptionWorkerSamples {
+        private final LongAdder samples = new LongAdder();
+        private final LongAdder direct = new LongAdder();
+        private final LongAdder intersecting = new LongAdder();
+        private final LongAdder totalNanos = new LongAdder();
+        private final LongAdder directNanos = new LongAdder();
+        private final LongAdder intersectingNanos = new LongAdder();
+        private final LongAdder worldNanos = new LongAdder();
+        private final LongAdder shipNanos = new LongAdder();
+        private final LongAdder waveNanos = new LongAdder();
+
+        void add(FrequencySableReceptionSnapshot.WorkerSample sample) {
+            samples.increment();
+            totalNanos.add(sample.totalNanos());
+            worldNanos.add(sample.worldNanos());
+            shipNanos.add(sample.shipNanos());
+            waveNanos.add(sample.waveNanos());
+
+            if (sample.shipHit()) {
+                intersecting.increment();
+                intersectingNanos.add(sample.totalNanos());
+            } else {
+                direct.increment();
+                directNanos.add(sample.totalNanos());
+            }
+        }
+
+        String summary() {
+            long count = samples.sum();
+            long total = totalNanos.sum();
+            long world = worldNanos.sum();
+            long ship = shipNanos.sum();
+            long wave = waveNanos.sum();
+
+            double average = 0.001 / Math.max(1L, count);
+
+            return String.format(Locale.ROOT, "stride=256 sampled=%d direct=%d intersecting=%d avgTotalUs=%.3f avgWorldInclusiveUs=%.3f avgShipUs=%.3f avgWaveFinalizeUs=%.3f avgOtherUs=%.3f avgDirectUs=%.3f avgIntersectingUs=%.3f", count, direct.sum(), intersecting.sum(), total * average, world * average, ship * average, wave * average, Math.max(0L, total - world - ship - wave) * average, directNanos.sum() * 0.001 / Math.max(1L, direct.sum()), intersectingNanos.sum() * 0.001 / Math.max(1L, intersecting.sum()));
+        }
+    }
 
     private static final class ReceptionPathSamples {
         final LongAdder sampled = new LongAdder();
@@ -2004,6 +2045,7 @@ public final class FrequencyEngine {
 
             boolean reflection = group.getFirst().reflection();
             ReceptionPathSamples pathSamples = receptionPathSamples;
+            ReceptionWorkerSamples workerSamples = receptionWorkerSamples;
 
             FrequencyParallelBatch.Job job = FrequencyApi.workers(level.getServer()).submitBatch(total, index -> {
                 int owner = owners[index];
@@ -2017,6 +2059,13 @@ public final class FrequencyEngine {
                 if (pathSamples != null && reflection && (index & 255) == 0 && !snapshots.get(owner).hasShipIntersections(path)) {
                     var sample = FrequencyMaterialAttenuation.sampleSnapshotPath(() -> snapshots.get(owner).factor(path, candidate.signal().frequencyHz(), reflection, receptionWave));
                     pathSamples.add(sample);
+                    return sample.factor();
+                }
+
+                if (workerSamples != null && (index & 255) == 128) {
+                    var sample = snapshots.get(owner).sampleFactor(path, candidate.signal().frequencyHz(), reflection, receptionWave);
+
+                    workerSamples.add(sample);
                     return sample.factor();
                 }
 
@@ -2344,11 +2393,17 @@ public final class FrequencyEngine {
     void enableReceptionPathSampling() {
         checkRunning();
         receptionPathSamples = new ReceptionPathSamples();
+        receptionWorkerSamples = new ReceptionWorkerSamples();
     }
 
     String receptionPathSamplesSummary() {
         checkRunning();
         return receptionPathSamples == null ? "disabled" : receptionPathSamples.summary();
+    }
+
+    String receptionWorkerSamplesSummary() {
+        checkRunning();
+        return receptionWorkerSamples == null ? "disabled" : receptionWorkerSamples.summary();
     }
 
     void shutdown() {

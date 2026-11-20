@@ -5,6 +5,16 @@ public final class MaterialAttenuationMath {
 
     private MaterialAttenuationMath() {}
 
+    public static double distanceMeters(double dx, double dy, double dz) {
+        double squared = Math.fma(dx, dx, Math.fma(dy, dy, dz * dz));
+
+        if (squared >= Double.MIN_NORMAL && Double.isFinite(squared)) {
+            return Math.sqrt(squared);
+        }
+
+        return Math.hypot(Math.hypot(dx, dy), dz);
+    }
+
     public static double accumulateLoss(double lossDb, double dbPerMeter, double meters) {
         return Math.fma(dbPerMeter, meters, lossDb);
     }

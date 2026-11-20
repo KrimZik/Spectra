@@ -43,4 +43,39 @@ class MaterialAttenuationMathTest {
         assertThrows(IllegalArgumentException.class, () -> MaterialAttenuationMath.amplitudeFactor(Double.POSITIVE_INFINITY));
         assertThrows(IllegalArgumentException.class, () -> MaterialAttenuationMath.relativeAmplitudeFactor(Double.NEGATIVE_INFINITY));
     }
+
+    @Test
+    void fastDistanceMatchesRobustHypot() {
+        java.util.Random random = new java.util.Random(51L);
+
+        for (int i = 0; i < 100_000; i++) {
+            double dx = random.nextDouble(-256.0, 256.0);
+            double dy = random.nextDouble(-256.0, 256.0);
+            double dz = random.nextDouble(-256.0, 256.0);
+
+            double expected = Math.hypot(Math.hypot(dx, dy), dz);
+            double actual = MaterialAttenuationMath.distanceMeters(dx, dy, dz);
+
+            assertEquals(expected, actual, 1.0e-12);
+        }
+    }
+
+    @Test
+    void fastDistancePreservesExtremeValues() {
+        double[][] vectors = {
+                {1.0e200, 1.0e200, 1.0e200},
+                {1.0e-200, 1.0e-200, 1.0e-200},
+                {Double.MIN_VALUE, 0.0, 0.0},
+                {Double.MAX_VALUE, 0.0, 0.0},
+                {0.0, 0.0, 0.0},
+                {-256.0, 256.0, -256.0}
+        };
+
+        for (double[] vector : vectors) {
+            double expected = Math.hypot(Math.hypot(vector[0], vector[1]), vector[2]);
+            double actual = MaterialAttenuationMath.distanceMeters(vector[0], vector[1], vector[2]);
+
+            assertEquals(expected, actual, Math.abs(expected) * 1.0e-15);
+        }
+    }
 }
