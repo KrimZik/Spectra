@@ -50,16 +50,14 @@ public final class SpectraProfileCommand {
         final Thread serverThread;
         final int emitters;
         final int receivers;
+        Receiver[] receiverSamples;
 
-        long baselineCallbacks;
         long callbacks;
         long immediateCallbacks;
-        long syncNanos;
         long submitNanos;
         long completionNanos;
         long startedNanos;
         long startedTick;
-        long syncAllocated;
         long submitAllocated;
         int queued;
         boolean offThread;
@@ -472,25 +470,10 @@ public final class SpectraProfileCommand {
                 engine.registerReceiver(receivers[i]);
             }
 
-            for (int warmup = 0; warmup < 2; warmup++) {
-                for (Receiver receiver : receivers) {
-                    engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distance, amplitude, travelTime) -> {});
-                }
-            }
+            profile.receiverSamples = receivers;
 
             ThreadMXBean memory = memoryBean();
             long threadId = Thread.currentThread().threadId();
-
-            long beforeSync = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
-            long startSync = System.nanoTime();
-
-            for (Receiver receiver : receivers) {
-                engine.forEachReceivedInRange(receiver, RANGE, (emitter, current, distance, amplitude, travelTime) -> profile.baselineCallbacks++);
-            }
-
-            profile.syncNanos = System.nanoTime() - startSync;
-            profile.syncAllocated = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId) - beforeSync;
-
             long beforeSubmit = memory == null ? -1L : memory.getThreadAllocatedBytes(threadId);
 
             profile.startedNanos = System.nanoTime();
@@ -564,16 +547,25 @@ public final class SpectraProfileCommand {
         }
 
         try {
-            double syncMs = profile.syncNanos / 1_000_000.0;
             double submitMs = profile.submitNanos / 1_000_000.0;
             double completionMs = profile.completionNanos / 1_000_000.0;
             double mainMs = submitMs + completionMs;
             double wallMs = (System.nanoTime() - profile.startedNanos) / 1_000_000.0;
 
-            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] THREADED_RECEPTION status=%s emitters=%d receivers=%d threads=%d queued=%d immediateCallbacks=%d expectedCallbacks=%d actualCallbacks=%d offThread=%s syncMs=%.3f submitMainMs=%.3f completionMainMs=%.3f totalMainMs=%.3f wallMs=%.3f syncAllocated=%d B submitAllocated=%d B", timedOut ? "TIMEOUT" : "COMPLETE", profile.emitters, profile.receivers, FrequencyMaterialConfig.workerThreads(), profile.queued, profile.immediateCallbacks, profile.baselineCallbacks, profile.callbacks, profile.offThread, syncMs, submitMs, completionMs, mainMs, wallMs, profile.syncAllocated, profile.submitAllocated));
+            long[] expectedCallbacks = {0L};
+
+            for (Receiver receiver : profile.receiverSamples) {
+                profile.engine.forEachMatchingInRange(receiver, RANGE, (emitter, signal, distanceSquared) -> expectedCallbacks[0]++);
+            }
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] THREADED_RECEPTION status=%s emitters=%d receivers=%d threads=%d queued=%d immediateCallbacks=%d expectedCallbacks=%d actualCallbacks=%d offThread=%s submitMainMs=%.3f completionMainMs=%.3f totalMainMs=%.3f wallMs=%.3f submitAllocated=%d B", timedOut ? "TIMEOUT" : "COMPLETE", profile.emitters, profile.receivers, FrequencyMaterialConfig.workerThreads(), profile.queued, profile.immediateCallbacks, expectedCallbacks[0], profile.callbacks, profile.offThread, submitMs, completionMs, mainMs, wallMs, profile.submitAllocated));
             LOGGER.info("[SPECTRA-PROFILE] SHARED_RECEPTION submittedBatches={} inFlightBatches={} peakInFlightBatches={} outstandingRequests={}", profile.engine.submittedReceptionBatchCount(), profile.engine.inFlightReceptionBatchCount(), profile.engine.peakInFlightReceptionBatchCount(), profile.engine.pendingReceptionBatchCount());
 
             var stages = profile.engine.receptionTimings();
+            int workers = Math.max(1, FrequencyMaterialConfig.workerThreads());
+            double occupancy = wallMs > 0.0 ? 100.0 * stages.workerThreadRunMs() / (workers * wallMs) : 0.0;
+
+            LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] WORKER_UTILIZATION estimatedTaskOccupancyPct=%.2f workerThreadRunMs=%.3f workerCapacityMs=%.3f", occupancy, stages.workerThreadRunMs(), workers * wallMs));
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_STAGES prepareMs=%.3f snapshotMs=%.3f validationMs=%.3f deliveryMs=%.3f synchronousMs=%.3f workerThreadRunMs=%.3f p95ActiveTickMs=%.3f maxActiveTickMs=%.3f activeTicks=%d adaptiveSyncRequests=%d materialValidationMs=%.3f emitterValidationMs=%.3f", stages.prepareMs(), stages.snapshotMs(), stages.validationMs(), stages.deliveryMs(), stages.synchronousMs(), stages.workerThreadRunMs(), stages.p95ActiveTickMs(), stages.maxActiveTickMs(), stages.activeTicks(), stages.adaptiveSyncRequests(), stages.materialValidationMs(), stages.emitterValidationMs()));
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] SNAPSHOT_CAPTURE pathsMs=%.3f worldMs=%.3f otherMs=%.3f", stages.snapshotPathsMs(), stages.snapshotWorldMs(), Math.max(0.0, stages.snapshotMs() - stages.snapshotPathsMs() - stages.snapshotWorldMs())));
 
@@ -586,8 +578,8 @@ public final class SpectraProfileCommand {
             var scheduler = profile.engine.receptionSchedulerDiagnostics();
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] RECEPTION_SCHEDULER headBlockedTicks=%d readyBehindHeadTicks=%d peakReadyBehindHead=%d overBudgetTicks=%d worstTickPrepareMs=%.3f worstTickSnapshotMs=%.3f worstTickValidationMs=%.3f worstTickDeliveryMs=%.3f worstTickSyncMs=%.3f worstTickOtherMs=%.3f", scheduler.headBlockedTicks(), scheduler.readyBehindHeadTicks(), scheduler.peakReadyBehindHead(), scheduler.overBudgetTicks(), scheduler.worstTickPrepareMs(), scheduler.worstTickSnapshotMs(), scheduler.worstTickValidationMs(), scheduler.worstTickDeliveryMs(), scheduler.worstTickSyncMs(), scheduler.worstTickOtherMs()));
 
-            if (timedOut || profile.callbacks != profile.baselineCallbacks || profile.offThread) {
-                LOGGER.warn("[SPECTRA-PROFILE] Threaded reception did not match the synchronous callback count or thread requirements");
+            if (timedOut || profile.callbacks != expectedCallbacks[0] || profile.offThread) {
+                LOGGER.warn("[SPECTRA-PROFILE] Threaded reception did not match the expected callback count or thread requirements");
             }
         } finally {
             profile.engine.shutdown();

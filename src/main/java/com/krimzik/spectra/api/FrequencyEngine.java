@@ -97,7 +97,7 @@ public final class FrequencyEngine {
     private static final int MAX_IN_FLIGHT_RECEPTION = 8; //4
     private static final int MAX_QUEUED_RECEPTION = 16384;
     private static final int MAX_RECEPTION_RETRIES = 2;
-    private static final long RECEPTION_TICK_BUDGET_NS = 2_000_000L;
+    private static final long RECEPTION_TICK_BUDGET_NS = 4_000_000L;
     private static final int DIRECT_MAX_RECEIVERS = 16;
     private static final long DIRECT_MAX_POTENTIAL_PAIRS = 24_000L;
 
