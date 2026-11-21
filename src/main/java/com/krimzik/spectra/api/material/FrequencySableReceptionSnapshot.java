@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 public final class FrequencySableReceptionSnapshot {
     public static final class CaptureTimings {
@@ -139,6 +140,7 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     private record CapturedPaths(Vec3 receiver, List<Ship> ships, List<List<Span>> paths, List<Vec3> emitters) {}
+    private record DeferredCapture(Vec3 receiver, List<Ship> ships, List<Vec3> emitters, boolean deferred) {}
 
     private record Ship(SubLevelAccess source, Pose3d pose, BoundingBox3d bounds) {
         boolean current() {
@@ -187,13 +189,19 @@ public final class FrequencySableReceptionSnapshot {
     private final List<Ship> ships;
     private final List<List<Span>> paths;
     private final List<Vec3> emitters;
+    private final AtomicReferenceArray<List<Span>> deferredPaths;
 
     private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<List<Span>> paths, List<Vec3> emitters) {
+        this(world, receiver, ships, paths, emitters, false);
+    }
+
+    private FrequencySableReceptionSnapshot(FrequencyMaterialWorldSnapshot world, Vec3 receiver, List<Ship> ships, List<List<Span>> paths, List<Vec3> emitters, boolean deferred) {
         this.world = world;
         this.receiver = receiver;
         this.ships = List.copyOf(ships);
         this.paths = List.copyOf(paths);
-        this.emitters = emitters;
+        this.emitters = List.copyOf(emitters);
+        this.deferredPaths = deferred ? new AtomicReferenceArray<>(emitters.size()) : null;
     }
 
     public static FrequencySableReceptionSnapshot capture(ServerLevel level, Vec3 receiver, List<Vec3> emitters, List<? extends SubLevelAccess> candidates) {
@@ -218,6 +226,13 @@ public final class FrequencySableReceptionSnapshot {
 
         if (inputs.isEmpty()) {
             return List.of();
+        }
+
+        if (sharedEmitterMin != null && sharedEmitterMax != null) {
+            List<FrequencySableReceptionSnapshot> deferred = captureDenseDeferred(level, inputs, timings, sharedEmitterMin, sharedEmitterMax);
+            if (deferred != null) {
+                return deferred;
+            }
         }
 
         long pathsStart = timings == null ? 0L : System.nanoTime();
@@ -408,8 +423,168 @@ public final class FrequencySableReceptionSnapshot {
         return List.copyOf(results);
     }
 
+    private static List<FrequencySableReceptionSnapshot> captureDenseDeferred(ServerLevel level, List<BatchInput> inputs, CaptureTimings timings, Vec3 emitterMin, Vec3 emitterMax) {
+        long pathsStart = timings == null ? 0L : System.nanoTime();
+
+        Coverage worldCoverage = new Coverage();
+        worldCoverage.includeDenseBounds(emitterMin, emitterMax);
+
+        IdentityHashMap<SubLevelAccess, Ship> copiedShips = new IdentityHashMap<>();
+        IdentityHashMap<Ship, Coverage> shipCoverage = new IdentityHashMap<>();
+        List<DeferredCapture> captured = new ArrayList<>(inputs.size());
+
+        for (BatchInput input : inputs) {
+            Vec3 receiver = input.receiver();
+            worldCoverage.include(receiver);
+
+            double minX = Math.min(emitterMin.x, receiver.x);
+            double minY = Math.min(emitterMin.y, receiver.y);
+            double minZ = Math.min(emitterMin.z, receiver.z);
+            double maxX = Math.max(emitterMax.x, receiver.x);
+            double maxY = Math.max(emitterMax.y, receiver.y);
+            double maxZ = Math.max(emitterMax.z, receiver.z);
+
+            List<Ship> ships = new ArrayList<>(input.candidates().size());
+            boolean intersectsCoverage = false;
+
+            for (SubLevelAccess source : input.candidates()) {
+                Ship ship = copiedShips.get(source);
+
+                if (ship == null) {
+                    ship = new Ship(source, new Pose3d(source.logicalPose()), new BoundingBox3d(source.boundingBox()));
+                    copiedShips.put(source, ship);
+                }
+
+                ships.add(ship);
+                BoundingBox3d bounds = ship.bounds();
+
+                if (bounds.maxX() < minX || bounds.minX() > maxX || bounds.maxY() < minY || bounds.minY() > maxY || bounds.maxZ() < minZ || bounds.minZ() > maxZ) {
+                    continue;
+                }
+
+                intersectsCoverage = true;
+
+                if (!shipCoverage.containsKey(ship)) {
+                    Coverage localCoverage = new Coverage();
+
+                    for (int corner = 0; corner < 8; corner++) {
+                        double x = (corner & 1) == 0 ? bounds.minX() : bounds.maxX();
+                        double y = (corner & 2) == 0 ? bounds.minY() : bounds.maxY();
+                        double z = (corner & 4) == 0 ? bounds.minZ() : bounds.maxZ();
+
+                        Vec3 local = ship.pose().transformPositionInverse(new Vec3(x, y, z));
+                        if (!Double.isFinite(local.x) || !Double.isFinite(local.y) || !Double.isFinite(local.z)) {
+                            return null;
+                        }
+
+                        localCoverage.include(local);
+                    }
+
+                    shipCoverage.put(ship, localCoverage);
+                }
+            }
+
+            captured.add(new DeferredCapture(receiver, List.copyOf(ships), input.emitters(), intersectsCoverage));
+        }
+
+        if (timings != null) {
+            timings.pathsNanos += System.nanoTime() - pathsStart;
+        }
+
+        long worldStart = timings == null ? 0L : System.nanoTime();
+
+        try {
+            FrequencyMaterialWorldSnapshot.Builder builder = FrequencyMaterialWorldSnapshot.builder(level);
+            worldCoverage.capture(builder);
+
+            for (Coverage coverage : shipCoverage.values()) {
+                coverage.capture(builder);
+            }
+
+            FrequencyMaterialWorldSnapshot world = builder.build();
+            List<FrequencySableReceptionSnapshot> results = new ArrayList<>(captured.size());
+
+            for (DeferredCapture entry : captured) {
+                if (timings != null) {
+                    if (entry.deferred()) {
+                        timings.shipBlockedReceivers++;
+                    } else {
+                        timings.fastReceivers++;
+                        timings.fastPaths += entry.emitters().size();
+                    }
+                }
+
+                results.add(new FrequencySableReceptionSnapshot(world, entry.receiver(), entry.ships(), List.of(), entry.emitters(), entry.deferred()));
+            }
+
+            return List.copyOf(results);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        } finally {
+            if (timings != null) {
+                timings.worldNanos += System.nanoTime() - worldStart;
+            }
+        }
+    }
+
+    private List<Span> pathSpans(int index) {
+        if (deferredPaths == null) {
+            return paths.isEmpty() ? List.of() : paths.get(index);
+        }
+
+        List<Span> cached = deferredPaths.get(index);
+
+        if (cached != null) {
+            return cached;
+        }
+
+        Vec3 start = emitters.get(index);
+        double dx = receiver.x - start.x;
+        double dy = receiver.y - start.y;
+        double dz = receiver.z - start.z;
+
+        SegmentAabbClip.Interval interval = new SegmentAabbClip.Interval();
+        List<Span> calculated = null;
+        double distance = 0.0;
+
+        for (Ship ship : ships) {
+            BoundingBox3d bounds = ship.bounds();
+            if (!SegmentAabbClip.clip(start.x, start.y, start.z, receiver.x, receiver.y, receiver.z, bounds.minX(), bounds.minY(), bounds.minZ(), bounds.maxX(), bounds.maxY(), bounds.maxZ(), interval)) {
+                continue;
+            }
+
+            double enter = interval.enter();
+            double exit = interval.exit();
+
+            Vec3 clippedStart = new Vec3(Math.fma(dx, enter, start.x), Math.fma(dy, enter, start.y), Math.fma(dz, enter, start.z));
+            Vec3 clippedEnd = new Vec3(Math.fma(dx, exit, start.x), Math.fma(dy, exit, start.y), Math.fma(dz, exit, start.z));
+
+            Pose3d pose = ship.pose();
+
+            Vec3 localStart = pose.transformPositionInverse(clippedStart);
+            Vec3 localEnd = pose.transformPositionInverse(clippedEnd);
+
+            if (calculated == null) {
+                calculated = new ArrayList<>();
+                distance = start.distanceTo(receiver);
+            }
+
+            var scale = pose.scale();
+            boolean scaled = scale.x() != 1.0 || scale.y() != 1.0 || scale.z() != 1.0;
+
+            calculated.add(new Span(localStart, localEnd, enter, exit, distance * (exit - enter), localStart.distanceTo(localEnd), scaled));
+        }
+
+        List<Span> result = calculated == null ? List.of() : List.copyOf(calculated);
+        if (deferredPaths.compareAndSet(index, null, result)) {
+            return result;
+        }
+
+        return deferredPaths.get(index);
+    }
+
     public boolean hasShipIntersections(int index) {
-        return !paths.isEmpty() && !paths.get(index).isEmpty();
+        return !pathSpans(index).isEmpty();
     }
 
     public WorkerSample sampleFactor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave) {
@@ -429,8 +604,9 @@ public final class FrequencySableReceptionSnapshot {
 
     private double factor(int index, double frequencyHz, boolean reflection, MinecraftCombinedWavePath wave, SampleTimings timings) {
         Vec3 start = emitters.get(index);
+        List<Span> spans = pathSpans(index);
 
-        if (paths.isEmpty() || paths.get(index).isEmpty()) {
+        if (spans.isEmpty()) {
             if (reflection) {
                 return timings == null ? wave.factorSnapshot(world, start, receiver, frequencyHz) : wave.factorSnapshotProfiled(world, start, receiver, frequencyHz, timings);
             }
@@ -445,7 +621,6 @@ public final class FrequencySableReceptionSnapshot {
             return result;
         }
 
-        List<Span> spans = paths.get(index);
         if (!reflection) {
             long started = timings == null ? 0L : System.nanoTime();
             double result = FrequencyMaterialAttenuation.factorSnapshot(world, start, receiver);

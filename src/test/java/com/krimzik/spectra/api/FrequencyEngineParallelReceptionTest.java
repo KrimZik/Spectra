@@ -1,15 +1,19 @@
 package com.krimzik.spectra.api;
 
+import com.krimzik.spectra.api.TRx.FrequencyEmitter;
 import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
 import com.krimzik.spectra.api.material.FrequencyMaterialConfig;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -328,5 +332,108 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
         assertTrue(scheduler.peakReadyBehindHead() <= 3);
         assertTrue(scheduler.overBudgetTicks() <= timings.activeTicks());
         assertTrue(scheduler.worstTickOtherMs() >= 0.0);
+    }
+
+    @Test
+    void sharedFixedFramePreservesFrequencyAndRange() throws Exception {
+        requireWorkers();
+
+        record FixedEmitter(Vec3 position, FrequencySignal signal)
+                implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 1024; i++) {
+            Vec3 position = i % 4 == 0
+                    ? new Vec3(300.0, 0.0, 0.0)
+                    : Vec3.ZERO;
+
+            double frequency = i % 2 == 0 ? 440.0 : 880.0;
+
+            engine.registerChunkBound(
+                    BlockPos.containing(position),
+                    new FixedEmitter(
+                            position,
+                            new FrequencySignal(frequency, 1.0, 0.0, 343.0)
+                    )
+            );
+        }
+
+        AtomicInteger callbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+
+            engine.scheduleReceptionInRange(
+                    receiver,
+                    256.0,
+                    (emitter, signal, distance, amplitude, travelTime) ->
+                            callbacks.incrementAndGet()
+            );
+        }
+
+        drain();
+
+        assertEquals(25 * 256, callbacks.get());
+        assertTrue(engine.submittedReceptionBatchCount() > 0);
+    }
+
+    @Test
+    void sharedFixedFrameRejectsDeactivatedEmitter() throws Exception {
+        requireWorkers();
+        FrequencySignal signal = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+
+        record FixedEmitter(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 1023; i++) {
+            engine.registerChunkBound(BlockPos.ZERO, new FixedEmitter(Vec3.ZERO, signal));
+        }
+
+        AtomicBoolean active = new AtomicBoolean(true);
+        FrequencyEmitter changed = new FrequencyEmitter() {
+            @Override
+            public Vec3 position() {
+                return Vec3.ZERO;
+            }
+
+            @Override
+            public FrequencySignal signal() {
+                return signal;
+            }
+
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+
+            @Override
+            public boolean isEmitting() {
+                return active.get();
+            }
+        };
+
+        engine.registerChunkBound(BlockPos.ZERO, changed);
+        AtomicInteger callbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+            engine.scheduleReceptionInRange(receiver, 1.0, (emitter, current, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        }
+
+        submitFirstWorkerBatch();
+        active.set(false);
+        drain();
+
+        assertEquals(25 * 1023, callbacks.get());
     }
 }

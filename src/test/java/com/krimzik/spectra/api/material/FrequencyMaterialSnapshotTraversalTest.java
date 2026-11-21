@@ -876,4 +876,60 @@ class FrequencyMaterialSnapshotTraversalTest {
         assertDoesNotThrow(() -> snapshot.factor(0, 1000.0, false, null));
         assertDoesNotThrow(() -> snapshot.factor(1, 1000.0, false, null));
     }
+
+    @Test
+    void deferredDenseShipPathsMatchExactSnapshotOffThread() throws Exception {
+        PalettedContainer<BlockState> states = states();
+        states.set(5, 0, 0, Blocks.IRON_BLOCK.defaultBlockState());
+        chunk(0, 0, states);
+
+        Pose3d pose = new Pose3d();
+        BoundingBox3d bounds = new BoundingBox3d(4.0, 64.0, 0.0, 6.0, 65.0, 1.0);
+
+        SubLevelAccess ship = mock(SubLevelAccess.class);
+        when(ship.logicalPose()).thenReturn(pose);
+        when(ship.boundingBox()).thenReturn(bounds);
+
+        Vec3 hit = new Vec3(0.5, 64.5, 0.5);
+        Vec3 miss = new Vec3(8.5, 64.5, 5.5);
+        Vec3 receiver = new Vec3(8.5, 64.5, 0.5);
+
+        var input = new FrequencySableReceptionSnapshot.BatchInput(receiver, List.of(hit, miss), List.of(ship));
+        var exact = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input)).getFirst();
+        var deferred = FrequencySableReceptionSnapshot.captureBatch(level, List.of(input), new FrequencySableReceptionSnapshot.CaptureTimings(), hit, miss).getFirst();
+
+        assertTrue(deferred.currentOnServer(List.of(ship)));
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            var propagation = new MinecraftMaterialPropagation(level);
+            var resolver = new MinecraftWaveMediumResolver(new WaveMedium(343.0, 1.0, 0.0), Map.of(FrequencyMaterialClassifier.METAL, new WaveMedium(3000.0, 3.0, 0.0)), List.of());
+
+            var wave = new MinecraftCombinedWavePath(propagation, resolver);
+
+            for (int i = 0; i < 2; i++) {
+                final int index = i;
+
+                double exactAttenuation = exact.factor(index, 915_000_000.0, false, wave);
+                double exactReflection = exact.factor(index, 915_000_000.0, true, wave);
+
+                var result = CompletableFuture.supplyAsync(() -> new double[]{
+                        deferred.factor(index, 915_000_000.0, false, wave),
+                        deferred.factor(index, 915_000_000.0, true, wave)
+                }, executor).get();
+
+                assertEquals(exactAttenuation, result[0], 1.0e-12);
+                assertEquals(exactReflection, result[1], 1.0e-12);
+                assertEquals(index == 0, deferred.hasShipIntersections(index));
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+
+        pose.position().set(0.0, 0.0, 8.0);
+        bounds.set(4.0, 64.0, 8.0, 6.0, 65.0, 9.0);
+
+        assertFalse(deferred.currentOnServer(List.of(ship)));
+    }
 }

@@ -95,6 +95,8 @@ public final class FrequencyEngine {
     private static final int MAX_GROUP_ITEMS = 16384; //8192
     private static final int MAX_GROUP_RECEIVERS = 64;
     private static final int MAX_IN_FLIGHT_RECEPTION = 8; //4
+    private static final int MAX_OUTSTANDING_RECEPTION_BATCHES = 16;
+    private static final long RECEPTION_DISPATCH_SLICE_NS = 1_000_000L;
     private static final int MAX_QUEUED_RECEPTION = 16384;
     private static final int MAX_RECEPTION_RETRIES = 2;
     private static final long RECEPTION_TICK_BUDGET_NS = 4_000_000L;
@@ -159,6 +161,50 @@ public final class FrequencyEngine {
     private record ParallelCandidate(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position, double distanceSquared) {}
     private record ReceptionRequest(FrequencyReceiver receiver, ReceiverRegistration registration, double range, FrequencyReceptionConsumer consumer, int retries) {}
     private record PreparedReception(ReceptionRequest request, Vec3 position, double frequency, double tolerance, boolean reflection, List<ParallelCandidate> candidates, List<? extends SubLevelAccess> ships, long emitterSetRevision) {}
+    private record FixedFrameEmitter(FrequencyEmitter emitter, FrequencySignal signal, Vec3 position) {}
+
+    private final class FixedEmitterFrame {
+        private final IdentityHashMap<FrequencyBucket, FixedFrameEmitter[]> buckets = new IdentityHashMap<>();
+
+        FixedFrameEmitter[] states(FrequencyBucket bucket) {
+            FixedFrameEmitter[] cached = buckets.get(bucket);
+
+            if (cached != null) {
+                return cached;
+            }
+
+            FixedFrameEmitter[] states = new FixedFrameEmitter[bucket.size];
+            for (int i = 0; i < bucket.size; i++) {
+                FrequencyEmitter emitter = bucket.get(i);
+
+                if (!emitter.isEmitting()) {
+                    continue;
+                }
+
+                states[i] = new FixedFrameEmitter(emitter, Objects.requireNonNull(emitter.signal()), Objects.requireNonNull(fixedEmitterPositions.get(emitter)));
+            }
+
+            buckets.put(bucket, states);
+            return states;
+        }
+    }
+
+    private static boolean sameCandidateOrder(List<ParallelCandidate> first, List<ParallelCandidate> second) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+
+        for (int i = 0; i < first.size(); i++) {
+            ParallelCandidate a = first.get(i);
+            ParallelCandidate b = second.get(i);
+
+            if (a.emitter() != b.emitter() || a.position() != b.position()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static final class ReceptionWorkerSamples {
         private final LongAdder samples = new LongAdder();
@@ -1810,9 +1856,21 @@ public final class FrequencyEngine {
         return submittedReceptionBatches;
     }
 
+    private int runningReceptionBatchCount() {
+        int running = 0;
+
+        for (SharedReceptionBatch batch : activeReception) {
+            if (!batch.job.complete()) {
+                running++;
+            }
+        }
+
+        return running;
+    }
+
     int inFlightReceptionBatchCount() {
         checkRunning();
-        return activeReception.size();
+        return runningReceptionBatchCount();
     }
 
     int peakInFlightReceptionBatchCount() {
@@ -1820,8 +1878,9 @@ public final class FrequencyEngine {
         return peakInFlightReceptionBatches;
     }
 
-    private PreparedReception prepareReception(ReceptionRequest request) {
+    private PreparedReception prepareReception(ReceptionRequest request, FixedEmitterFrame frame) {
         long started = System.nanoTime();
+
         try {
             FrequencyReceiver receiver = request.receiver();
             if (receivers.get(receiver) != request.registration()) {
@@ -1836,20 +1895,62 @@ public final class FrequencyEngine {
             }
 
             Vec3 position = FrequencySpace.worldPosition(level, Objects.requireNonNull(receiver.position()));
-
             List<ParallelCandidate> candidates = new ArrayList<>();
-            forEachMatchingInRange(receiver, request.range(), (emitter, signal, distanceSquared) -> {
-                if (candidates.size() > MAX_GROUP_ITEMS) {
-                    return;
+            boolean usedFrame = false;
+
+            if (frame != null) {
+                NavigableMap<Double, FrequencyBucket> matching = byFrequency.subMap(frequency - tolerance, true, frequency + tolerance, true);
+
+                int fixedCandidates = 0;
+                for (FrequencyBucket bucket : matching.values()) {
+                    fixedCandidates += bucket.size;
                 }
 
-                Vec3 emitterPosition = fixedEmitterPositions.get(emitter);
-                if (emitterPosition == null) {
-                    emitterPosition = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
-                }
+                if (!fixedEmitterSpatialIndex.favorsIndex(position.x, position.y, position.z, request.range(), fixedCandidates)) {
+                    usedFrame = true;
+                    double rangeSquared = request.range() * request.range();
 
-                candidates.add(new ParallelCandidate(emitter, signal, emitterPosition, distanceSquared));
-            });
+                    activeQueries++;
+
+                    try {
+                        search:
+                        for (FrequencyBucket bucket : matching.values()) {
+                            for (FixedFrameEmitter state : frame.states(bucket)) {
+                                if (state == null || Math.abs(state.signal().frequencyHz() - frequency) > tolerance) {
+                                    continue;
+                                }
+
+                                double distanceSquared = state.position().distanceToSqr(position);
+                                if (!(distanceSquared <= rangeSquared)) {
+                                    continue;
+                                }
+
+                                candidates.add(new ParallelCandidate(state.emitter(), state.signal(), state.position(), distanceSquared));
+                                if (candidates.size() > MAX_GROUP_ITEMS) {
+                                    break search;
+                                }
+                            }
+                        }
+                    } finally {
+                        activeQueries--;
+                    }
+                }
+            }
+
+            if (!usedFrame) {
+                forEachMatchingInRange(receiver, request.range(), (emitter, signal, distanceSquared) -> {
+                    if (candidates.size() > MAX_GROUP_ITEMS) {
+                        return;
+                    }
+
+                    Vec3 emitterPosition = fixedEmitterPositions.get(emitter);
+                    if (emitterPosition == null) {
+                        emitterPosition = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
+                    }
+
+                    candidates.add(new ParallelCandidate(emitter, signal, emitterPosition, distanceSquared));
+                });
+            }
 
             boolean reflection = FrequencyMaterialConfig.reflectionEnabled();
             List<? extends SubLevelAccess> ships = reflection ? pathAttenuation.waveReceiverCandidates(position, request.range()) : pathAttenuation.receiverCandidates(position, request.range());
@@ -1931,14 +2032,17 @@ public final class FrequencyEngine {
     }
 
     private void dispatchReceptionBatches(long deadline) {
-        while (activeReception.size() < MAX_IN_FLIGHT_RECEPTION && System.nanoTime() < deadline && (!receptionQueue.isEmpty() || !stagedReception.isEmpty() || !assemblingReception.isEmpty())) {
+        int runningBatches = runningReceptionBatchCount();
+
+        FixedEmitterFrame emitterFrame = emitters.size() >= 512 && fixedEmitterPositions.size() == emitters.size() && receptionQueue.size() + stagedReception.size() + assemblingReception.size() > 1 ? new FixedEmitterFrame() : null;
+        while (runningBatches < MAX_IN_FLIGHT_RECEPTION && activeReception.size() < MAX_OUTSTANDING_RECEPTION_BATCHES && System.nanoTime() < deadline && (!receptionQueue.isEmpty() || !stagedReception.isEmpty() || !assemblingReception.isEmpty())) {
             List<PreparedReception> selected = assemblingReception;
             int total = assemblingReceptionItems;
 
             while (selected.size() < MAX_GROUP_RECEIVERS && System.nanoTime() < deadline && (!stagedReception.isEmpty() || !receptionQueue.isEmpty())) {
                 PreparedReception prepared = stagedReception.pollFirst();
                 if (prepared == null) {
-                    prepared = prepareReception(receptionQueue.removeFirst());
+                    prepared = prepareReception(receptionQueue.removeFirst(), emitterFrame);
                 }
 
                 if (prepared == null) {
@@ -1989,13 +2093,30 @@ public final class FrequencyEngine {
             receptionDenseBoundsNanos += System.nanoTime() - boundsStart;
 
             long inputsStart = System.nanoTime();
+
             List<FrequencySableReceptionSnapshot.BatchInput> inputs = new ArrayList<>(selected.size());
+            List<ParallelCandidate> referenceCandidates = null;
+            List<Vec3> sharedPositions = null;
 
             for (PreparedReception prepared : selected) {
-                List<Vec3> positions = new ArrayList<>(prepared.candidates().size());
+                List<ParallelCandidate> candidates = prepared.candidates();
+                List<Vec3> positions;
 
-                for (ParallelCandidate candidate : prepared.candidates()) {
-                    positions.add(candidate.position());
+                if (sharedPositions != null && sameCandidateOrder(referenceCandidates, candidates)) {
+                    positions = sharedPositions;
+                } else {
+                    List<Vec3> captured = new ArrayList<>(candidates.size());
+
+                    for (ParallelCandidate candidate : candidates) {
+                        captured.add(candidate.position());
+                    }
+
+                    positions = List.copyOf(captured);
+
+                    if (denseBounds != null && sharedPositions == null) {
+                        referenceCandidates = candidates;
+                        sharedPositions = positions;
+                    }
                 }
 
                 inputs.add(new FrequencySableReceptionSnapshot.BatchInput(prepared.position(), positions, prepared.ships()));
@@ -2084,7 +2205,8 @@ public final class FrequencyEngine {
             }
 
             activeReception.addLast(new SharedReceptionBatch(group, snapshots, offsets, job));
-            peakInFlightReceptionBatches = Math.max(peakInFlightReceptionBatches, activeReception.size());
+            runningBatches++;
+            peakInFlightReceptionBatches = Math.max(peakInFlightReceptionBatches, runningBatches);
 
             submittedReceptionBatches++;
             lastReceptionDecision = "worker_batch";
@@ -2213,7 +2335,6 @@ public final class FrequencyEngine {
         long tickStart = System.nanoTime();
         boolean hadWork = pendingReceptionBatchCount() != 0;
         long deadline = tickStart + RECEPTION_TICK_BUDGET_NS;
-
         long prepareBefore = receptionPrepareNanos;
         long snapshotBefore = receptionSnapshotNanos;
         long validationBefore = receptionValidationNanos;
@@ -2221,26 +2342,41 @@ public final class FrequencyEngine {
         long syncBefore = receptionSyncNanos;
 
         try {
+            selectSmallReceptionWorkload();
+
+            if (runningReceptionBatchCount() < MAX_IN_FLIGHT_RECEPTION && activeReception.size() < MAX_OUTSTANDING_RECEPTION_BATCHES) {
+                dispatchReceptionBatches(Math.min(deadline, tickStart + RECEPTION_DISPATCH_SLICE_NS));
+            }
+
             while (!activeReception.isEmpty() && System.nanoTime() < deadline) {
                 SharedReceptionBatch batch = activeReception.peekFirst();
 
                 if (!batch.job.complete()) {
                     receptionHeadBlockedTicks++;
 
+                    SharedReceptionBatch ready = null;
                     int readyBehind = 0;
 
                     for (SharedReceptionBatch later : activeReception) {
                         if (later != batch && later.job.complete()) {
                             readyBehind++;
+
+                            if (ready == null) {
+                                ready = later;
+                            }
                         }
                     }
 
-                    if (readyBehind > 0) {
-                        receptionReadyBehindHeadTicks++;
-                        receptionPeakReadyBehindHead = Math.max(receptionPeakReadyBehindHead, readyBehind);
+                    if (ready == null) {
+                        break;
                     }
 
-                    break;
+                    receptionReadyBehindHeadTicks++;
+                    receptionPeakReadyBehindHead = Math.max(receptionPeakReadyBehindHead, readyBehind);
+
+                    activeReception.remove(ready);
+                    activeReception.addFirst(ready);
+                    batch = ready;
                 }
 
                 if (batch.results == null) {
