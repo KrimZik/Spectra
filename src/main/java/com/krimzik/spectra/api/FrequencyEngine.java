@@ -44,6 +44,11 @@ public final class FrequencyEngine {
     private final NavigableMap<Double, FrequencyBucket> liveByFrequency = new TreeMap<>();
     private final FrequencySpatialIndex<FrequencyEmitter> fixedEmitterSpatialIndex = new FrequencySpatialIndex<>();
     private final IdentityHashMap<FrequencyEmitter, Vec3> fixedEmitterPositions = new IdentityHashMap<>();
+    private final double[] fixedEmitterBounds = {
+            Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY,
+            Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY
+    };
+    private boolean fixedEmitterBoundsDirty;
     private final IdentityHashMap<FrequencyEmitter, EmitterMotionSample> emitterMotionSamples = new IdentityHashMap<>();
     private final Map<Long, Set<FrequencyRegistration>> chunkRegistrations = new HashMap<>();
     private final Map<Entity, Set<FrequencyRegistration>> entityRegistrations = new IdentityHashMap<>();
@@ -357,8 +362,15 @@ public final class FrequencyEngine {
                     removeFromIndex(emitter, frequency);
                     emitterSetRevision++;
 
-                    if (fixedEmitterPositions.remove(emitter) != null) {
+                    Vec3 fixedPosition = fixedEmitterPositions.remove(emitter);
+
+                    if (fixedPosition != null) {
                         fixedEmitterSpatialIndex.remove(emitter);
+
+                        double[] bounds = fixedEmitterBounds;
+                        if (fixedPosition.x <= bounds[0] || fixedPosition.y <= bounds[1] || fixedPosition.z <= bounds[2] || fixedPosition.x >= bounds[3] || fixedPosition.y >= bounds[4] || fixedPosition.z >= bounds[5]) {
+                            fixedEmitterBoundsDirty = true;
+                        }
                     } else {
                         removeFromLiveIndex(emitter, frequency);
                     }
@@ -1004,6 +1016,10 @@ public final class FrequencyEngine {
         if (fixedWorldPosition != null) {
             fixedEmitterSpatialIndex.update(emitter, fixedWorldPosition.x, fixedWorldPosition.y, fixedWorldPosition.z);
             fixedEmitterPositions.put(emitter, fixedWorldPosition);
+
+            if (!fixedEmitterBoundsDirty) {
+                expandFixedEmitterBounds(fixedWorldPosition);
+            }
         } else {
             addToLiveIndex(emitter, frequency);
         }
@@ -1242,6 +1258,7 @@ public final class FrequencyEngine {
         }
 
         emitters.put(emitter, newFrequency);
+        emitterSetRevision++;
     }
 
     public void sampleEmitterMotion(FrequencyEmitter emitter, FrequencyMotionSnapshot motion, FrequencyAccelerationTracker.Frame frame, UUID sublevelId, boolean continuous) {
@@ -1926,9 +1943,6 @@ public final class FrequencyEngine {
                                 }
 
                                 candidates.add(new ParallelCandidate(state.emitter(), state.signal(), state.position(), distanceSquared));
-                                if (candidates.size() > MAX_GROUP_ITEMS) {
-                                    break search;
-                                }
                             }
                         }
                     } finally {
@@ -1939,10 +1953,6 @@ public final class FrequencyEngine {
 
             if (!usedFrame) {
                 forEachMatchingInRange(receiver, request.range(), (emitter, signal, distanceSquared) -> {
-                    if (candidates.size() > MAX_GROUP_ITEMS) {
-                        return;
-                    }
-
                     Vec3 emitterPosition = fixedEmitterPositions.get(emitter);
                     if (emitterPosition == null) {
                         emitterPosition = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
@@ -1967,7 +1977,7 @@ public final class FrequencyEngine {
         }
 
         int count = receptionQueue.size();
-        if (count > DIRECT_MAX_RECEIVERS || (long) count * emitters.size() > DIRECT_MAX_POTENTIAL_PAIRS) {
+        if (count > DIRECT_MAX_RECEIVERS || emitters.size() > MAX_GROUP_ITEMS || (long) count * emitters.size() > DIRECT_MAX_POTENTIAL_PAIRS) {
             return;
         }
 
@@ -1979,9 +1989,20 @@ public final class FrequencyEngine {
         lastReceptionDecision = "adaptive_synchronous";
     }
 
+    private void expandFixedEmitterBounds(Vec3 position) {
+        double[] bounds = fixedEmitterBounds;
+
+        bounds[0] = Math.min(bounds[0], position.x);
+        bounds[1] = Math.min(bounds[1], position.y);
+        bounds[2] = Math.min(bounds[2], position.z);
+
+        bounds[3] = Math.max(bounds[3], position.x);
+        bounds[4] = Math.max(bounds[4], position.y);
+        bounds[5] = Math.max(bounds[5], position.z);
+    }
+
     private Vec3[] denseFixedEmitterBounds(List<PreparedReception> selected) {
         int count = emitters.size();
-
         if (selected.isEmpty() || count <= 32) {
             return null;
         }
@@ -2005,29 +2026,20 @@ public final class FrequencyEngine {
         }
 
         receptionDenseEligibleBatches++;
+        if (fixedEmitterBoundsDirty) {
+            Arrays.fill(fixedEmitterBounds, 0, 3, Double.POSITIVE_INFINITY);
+            Arrays.fill(fixedEmitterBounds, 3, 6, Double.NEGATIVE_INFINITY);
 
-        double minX = Double.POSITIVE_INFINITY;
-        double minY = Double.POSITIVE_INFINITY;
-        double minZ = Double.POSITIVE_INFINITY;
-        double maxX = Double.NEGATIVE_INFINITY;
-        double maxY = Double.NEGATIVE_INFINITY;
-        double maxZ = Double.NEGATIVE_INFINITY;
+            for (Vec3 position : fixedEmitterPositions.values()) {
+                expandFixedEmitterBounds(position);
+            }
 
-        for (ParallelCandidate candidate : selected.getFirst().candidates()) {
-            Vec3 position = candidate.position();
-
-            minX = Math.min(minX, position.x);
-            minY = Math.min(minY, position.y);
-            minZ = Math.min(minZ, position.z);
-
-            maxX = Math.max(maxX, position.x);
-            maxY = Math.max(maxY, position.y);
-            maxZ = Math.max(maxZ, position.z);
+            fixedEmitterBoundsDirty = false;
         }
 
         return new Vec3[]{
-                new Vec3(minX, minY, minZ),
-                new Vec3(maxX, maxY, maxZ)
+                new Vec3(fixedEmitterBounds[0], fixedEmitterBounds[1], fixedEmitterBounds[2]),
+                new Vec3(fixedEmitterBounds[3], fixedEmitterBounds[4], fixedEmitterBounds[5])
         };
     }
 
@@ -2054,17 +2066,12 @@ public final class FrequencyEngine {
                     continue;
                 }
 
-                if (count > MAX_GROUP_ITEMS) {
-                    syncReception.addLast(prepared.request());
-                    continue;
-                }
-
                 if (!selected.isEmpty() && prepared.reflection() != selected.getFirst().reflection()) {
                     stagedReception.addFirst(prepared);
                     break;
                 }
 
-                if (total + count > MAX_GROUP_ITEMS) {
+                if (!selected.isEmpty() && (long) total + count > MAX_GROUP_ITEMS) {
                     stagedReception.addFirst(prepared);
                     break;
                 }
@@ -2072,6 +2079,10 @@ public final class FrequencyEngine {
                 selected.add(prepared);
                 total += count;
                 assemblingReceptionItems = total;
+
+                if (total >= MAX_GROUP_ITEMS) {
+                    break;
+                }
             }
 
             if (System.nanoTime() >= deadline) {
@@ -2217,25 +2228,24 @@ public final class FrequencyEngine {
     }
 
     private boolean denseReceptionEmittersCurrent(PreparedReception prepared) {
-        double minFrequency = prepared.frequency() - prepared.tolerance();
-        double maxFrequency = prepared.frequency() + prepared.tolerance();
+        if (prepared.emitterSetRevision() != emitterSetRevision) {
+            return false;
+        }
 
+        boolean allFixed = fixedEmitterPositions.size() == emitters.size();
         for (ParallelCandidate captured : prepared.candidates()) {
             FrequencyEmitter emitter = captured.emitter();
-            Double registeredFrequency = emitters.get(emitter);
 
-            if (registeredFrequency == null || registeredFrequency < minFrequency || registeredFrequency > maxFrequency || !emitter.isEmitting() || !captured.signal().equals(Objects.requireNonNull(emitter.signal()))) {
+            if (!emitter.isEmitting() || !captured.signal().equals(Objects.requireNonNull(emitter.signal()))) {
                 return false;
             }
 
-            Vec3 position = fixedEmitterPositions.get(emitter);
+            if (!allFixed && fixedEmitterPositions.get(emitter) == null) {
+                Vec3 position = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
 
-            if (position == null) {
-                position = FrequencySpace.worldPosition(level, Objects.requireNonNull(emitter.position()));
-            }
-
-            if (!captured.position().equals(position)) {
-                return false;
+                if (!captured.position().equals(position)) {
+                    return false;
+                }
             }
         }
 
@@ -2247,6 +2257,10 @@ public final class FrequencyEngine {
         FrequencyReceiver receiver = request.receiver();
 
         if (receivers.get(receiver) != request.registration() || prepared.reflection() != FrequencyMaterialConfig.reflectionEnabled() || Double.compare(prepared.frequency(), receiver.tunedFrequencyHz()) != 0 || Double.compare(prepared.tolerance(), receiver.toleranceHz()) != 0 || !prepared.position().equals(FrequencySpace.worldPosition(level, Objects.requireNonNull(receiver.position())))) {
+            return false;
+        }
+
+        if (prepared.emitterSetRevision() != emitterSetRevision) {
             return false;
         }
 

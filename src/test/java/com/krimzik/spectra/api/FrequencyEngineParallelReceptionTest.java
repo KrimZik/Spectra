@@ -1,6 +1,7 @@
 package com.krimzik.spectra.api;
 
 import com.krimzik.spectra.api.TRx.FrequencyEmitter;
+import com.krimzik.spectra.api.TRx.FrequencyReceiver;
 import com.krimzik.spectra.api.material.FrequencyMaterialAttenuation;
 import com.krimzik.spectra.api.material.FrequencyMaterialConfig;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -15,6 +16,7 @@ import org.mockito.MockedStatic;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.*;
@@ -435,5 +437,224 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
         drain();
 
         assertEquals(25 * 1023, callbacks.get());
+    }
+
+    @Test
+    void oversizedReceiverUsesParallelReceptionWithoutLosingSignals() throws Exception {
+        requireWorkers();
+        int emitterCount = 16_385;
+        registerEmitters(emitterCount);
+
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+        engine.registerReceiver(receiver);
+
+        AtomicInteger callbacks = new AtomicInteger();
+        engine.scheduleReceptionInRange(receiver, 1.0, (emitter, signal, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        drain();
+
+        assertEquals(emitterCount, callbacks.get());
+        assertTrue(engine.submittedReceptionBatchCount() > 0);
+        assertEquals(0, engine.receptionTimings().adaptiveSyncRequests());
+        assertEquals(0.0, engine.receptionTimings().synchronousMs());
+        assertEquals(0, engine.pendingReceptionBatchCount());
+    }
+
+    @Test
+    void denseReceptionDetectsRegisteredFrequencyChange() throws Exception {
+        requireWorkers();
+
+        FrequencySignal original = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+        FrequencySignal[] current = {original};
+
+        record FixedEmitter(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 1023; i++) {
+            engine.registerChunkBound(BlockPos.ZERO, new FixedEmitter(Vec3.ZERO, original));
+        }
+
+        FrequencyEmitter changed = new FrequencyEmitter() {
+            @Override
+            public Vec3 position() {
+                return Vec3.ZERO;
+            }
+
+            @Override
+            public FrequencySignal signal() {
+                return current[0];
+            }
+
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        };
+
+        engine.registerChunkBound(BlockPos.ZERO, changed);
+        AtomicInteger callbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+            engine.scheduleReceptionInRange(receiver, 1.0, (emitter, signal, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        }
+
+        submitFirstWorkerBatch();
+
+        current[0] = new FrequencySignal(880.0, 1.0, 0.0, 343.0);
+        engine.updateEmitter(changed);
+
+        drain();
+
+        assertEquals(25 * 1023, callbacks.get());
+    }
+
+    @Test
+    void denseReceptionRevalidatesAfterCallbackChangesSignal() throws Exception {
+        requireWorkers();
+
+        FrequencySignal original = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+        FrequencySignal[] current = {original};
+
+        record FixedEmitter(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 1023; i++) {
+            engine.registerChunkBound(BlockPos.ZERO, new FixedEmitter(Vec3.ZERO, original));
+        }
+
+        FrequencyEmitter changed = new FrequencyEmitter() {
+            @Override
+            public Vec3 position() {
+                return Vec3.ZERO;
+            }
+
+            @Override
+            public FrequencySignal signal() {
+                return current[0];
+            }
+
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        };
+
+        engine.registerChunkBound(BlockPos.ZERO, changed);
+
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicInteger changedCallbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            TestReceiver receiver = new TestReceiver(440.0, 0.0);
+            engine.registerReceiver(receiver);
+
+            engine.scheduleReceptionInRange(receiver, 1.0, (emitter, signal, distance, amplitude, travelTime) -> {
+                callbacks.incrementAndGet();
+
+                if (emitter == changed) {
+                    if (changedCallbacks.getAndIncrement() == 0) {
+                        current[0] = new FrequencySignal(440.0, 0.5, 0.0, 343.0);
+                    } else {
+                        assertEquals(0.5, signal.amplitude(), 0.0);
+                    }
+                }
+            });
+        }
+
+        drain();
+
+        assertEquals(25 * 1024, callbacks.get());
+        assertEquals(25, changedCallbacks.get());
+    }
+
+    @Test
+    void denseBoundsRemainValidAfterBoundaryEmitterReplacement() throws Exception {
+        requireWorkers();
+        FrequencySignal signal = new FrequencySignal(440.0, 1.0, 0.0, 343.0);
+
+        record FixedEmitter(Vec3 position, FrequencySignal signal) implements FrequencyEmitter {
+            @Override
+            public boolean hasFixedWorldPosition() {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 1024; i++) {
+            engine.registerChunkBound(BlockPos.ZERO, new FixedEmitter(Vec3.ZERO, signal));
+        }
+
+        Vec3 firstPosition = new Vec3(8.0, 0.0, 0.0);
+        var first = engine.registerChunkBound(BlockPos.containing(firstPosition), new FixedEmitter(firstPosition, signal));
+
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+        engine.registerReceiver(receiver);
+
+        AtomicInteger callbacks = new AtomicInteger();
+
+        for (int i = 0; i < 25; i++) {
+            engine.scheduleReceptionInRange(receiver, 32.0, (emitter, current, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        }
+
+        drain();
+        assertEquals(25 * 1025, callbacks.get());
+
+        first.close();
+
+        Vec3 secondPosition = new Vec3(-8.0, 0.0, 0.0);
+        engine.registerChunkBound(BlockPos.containing(secondPosition), new FixedEmitter(secondPosition, signal));
+
+        for (int i = 0; i < 25; i++) {
+            engine.scheduleReceptionInRange(receiver, 32.0, (emitter, current, distance, amplitude, travelTime) -> callbacks.incrementAndGet());
+        }
+
+        drain();
+
+        assertEquals(50 * 1025, callbacks.get());
+        assertEquals(0.0, engine.receptionTimings().synchronousMs());
+        assertEquals(0, engine.pendingReceptionBatchCount());
+    }
+
+    @Test
+    void receiverMovementInvalidatesQueuedReception() throws Exception {
+        requireWorkers();
+        registerEmitters(1024);
+
+        AtomicReference<Vec3> position = new AtomicReference<>(Vec3.ZERO);
+
+        FrequencyReceiver receiver = mock(FrequencyReceiver.class);
+        when(receiver.position()).thenAnswer(invocation -> position.get());
+        when(receiver.tunedFrequencyHz()).thenReturn(440.0);
+        when(receiver.toleranceHz()).thenReturn(0.0);
+
+        engine.registerReceiver(receiver);
+
+        Thread serverThread = Thread.currentThread();
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicInteger staleResults = new AtomicInteger();
+
+        engine.scheduleReceptionInRange(receiver, 1.0,
+                (emitter, signal, distanceSquared, amplitude, travelTime) -> {
+                    if (Thread.currentThread() != serverThread || Math.abs(distanceSquared - 0.0625) > 1.0e-12) {
+                        staleResults.incrementAndGet();
+                    }
+
+                    callbacks.incrementAndGet();
+                });
+
+        submitFirstWorkerBatch();
+        position.set(new Vec3(0.25, 0.0, 0.0));
+        drain();
+
+        assertEquals(1024, callbacks.get());
+        assertEquals(0, staleResults.get());
     }
 }

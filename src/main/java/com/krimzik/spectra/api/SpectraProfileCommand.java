@@ -103,7 +103,7 @@ public final class SpectraProfileCommand {
                                         .executes(context -> profileReceivers(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers")))))
                         .then(Commands.literal("threaded")
                                 .executes(context -> profileThreaded(context.getSource(), 1200, 2))
-                                .then(Commands.argument("emitters", IntegerArgumentType.integer(1024, 3000))
+                                .then(Commands.argument("emitters", IntegerArgumentType.integer(1024, 20000))
                                         .executes(context -> profileThreaded(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), 2))
                                         .then(Commands.argument("receivers", IntegerArgumentType.integer(1, 3000))
                                                 .executes(context -> profileThreaded(context.getSource(), IntegerArgumentType.getInteger(context, "emitters"), IntegerArgumentType.getInteger(context, "receivers"))))))
@@ -570,7 +570,7 @@ public final class SpectraProfileCommand {
             LOGGER.info(String.format(Locale.ROOT, "[SPECTRA-PROFILE] SNAPSHOT_CAPTURE pathsMs=%.3f worldMs=%.3f otherMs=%.3f", stages.snapshotPathsMs(), stages.snapshotWorldMs(), Math.max(0.0, stages.snapshotMs() - stages.snapshotPathsMs() - stages.snapshotWorldMs())));
 
             var dense = profile.engine.denseReceptionDiagnostics();
-            LOGGER.info("[SPECTRA-PROFILE] DENSE_SNAPSHOT eligibleBatches={} blockedLive={} blockedPartial={} blockedShips={} blockedRevision={} fastReceivers={} fastPaths={} boundsMs={} inputsMs={}", dense.eligibleBatches(), dense.blockedLive(), dense.blockedPartial(), dense.blockedShips(), dense.blockedRevision(), dense.fastReceivers(), dense.fastPaths(), String.format(Locale.ROOT, "%.3f", dense.boundsMs()), String.format(Locale.ROOT, "%.3f", dense.inputsMs()));
+            LOGGER.info("[SPECTRA-PROFILE] DENSE_SNAPSHOT eligibleBatches={} blockedLive={} blockedPartial={} shipChecksRequired={} blockedRevision={} fastReceivers={} fastPaths={} boundsMs={} inputsMs={}", dense.eligibleBatches(), dense.blockedLive(), dense.blockedPartial(), dense.blockedShips(), dense.blockedRevision(), dense.fastReceivers(), dense.fastPaths(), String.format(Locale.ROOT, "%.3f", dense.boundsMs()), String.format(Locale.ROOT, "%.3f", dense.inputsMs()));
             LOGGER.info("[SPECTRA-PROFILE] SNAPSHOT_PATH_SAMPLES {}", profile.engine.receptionPathSamplesSummary());
             LOGGER.info("[SPECTRA-PROFILE] WORKER_SAMPLES {}", profile.engine.receptionWorkerSamplesSummary());
             LOGGER.info("[SPECTRA-PROFILE] WORKER_PIPELINE {}", profile.engine.receptionWorkerPipelineSummary());

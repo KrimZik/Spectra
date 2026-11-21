@@ -158,6 +158,48 @@ public final class FrequencySableReceptionSnapshot {
     }
 
     private record Span(Vec3 from, Vec3 to, double enter, double exit, double worldMeters, double localMeters, boolean scaled) {}
+    private static List<Span> captureSpans(Vec3 start, Vec3 receiver, List<Ship> ships, SegmentAabbClip.Interval interval, IdentityHashMap<Ship, Coverage> shipCoverage) {
+        double dx = receiver.x - start.x;
+        double dy = receiver.y - start.y;
+        double dz = receiver.z - start.z;
+
+        double distance = 0.0;
+        List<Span> spans = null;
+
+        for (Ship ship : ships) {
+            BoundingBox3d bounds = ship.bounds();
+
+            if (!SegmentAabbClip.clip(start.x, start.y, start.z, receiver.x, receiver.y, receiver.z, bounds.minX(), bounds.minY(), bounds.minZ(), bounds.maxX(), bounds.maxY(), bounds.maxZ(), interval)) {
+                continue;
+            }
+
+            double enter = interval.enter();
+            double exit = interval.exit();
+
+            Vec3 clippedStart = new Vec3(Math.fma(dx, enter, start.x), Math.fma(dy, enter, start.y), Math.fma(dz, enter, start.z));
+            Vec3 clippedEnd = new Vec3(Math.fma(dx, exit, start.x), Math.fma(dy, exit, start.y), Math.fma(dz, exit, start.z));
+
+            Pose3d pose = ship.pose();
+            Vec3 localStart = pose.transformPositionInverse(clippedStart);
+            Vec3 localEnd = pose.transformPositionInverse(clippedEnd);
+
+            if (shipCoverage != null) {
+                shipCoverage.computeIfAbsent(ship, ignored -> new Coverage()).include(localStart, localEnd);
+            }
+
+            var scale = pose.scale();
+            boolean scaled = scale.x() != 1.0 || scale.y() != 1.0 || scale.z() != 1.0;
+
+            if (spans == null) {
+                spans = new ArrayList<>();
+                distance = start.distanceTo(receiver);
+            }
+
+            spans.add(new Span(localStart, localEnd, enter, exit, distance * (exit - enter), localStart.distanceTo(localEnd), scaled));
+        }
+
+        return spans == null ? List.of() : List.copyOf(spans);
+    }
 
     public record WorkerSample(double factor, boolean shipHit, long totalNanos, long worldNanos, long shipNanos, long waveNanos) {}
 
@@ -328,48 +370,9 @@ public final class FrequencySableReceptionSnapshot {
                     worldCoverage.include(start, receiver);
                 }
 
-                if (ships.isEmpty()) {
-                    continue;
+                if (!ships.isEmpty()) {
+                    paths.add(captureSpans(start, receiver, ships, interval, shipCoverage));
                 }
-
-                double dx = receiver.x - start.x;
-                double dy = receiver.y - start.y;
-                double dz = receiver.z - start.z;
-
-                double distance = 0.0;
-                List<Span> spans = null;
-
-                for (Ship ship : ships) {
-                    BoundingBox3d bounds = ship.bounds();
-
-                    if (!SegmentAabbClip.clip(start.x, start.y, start.z, receiver.x, receiver.y, receiver.z, bounds.minX(), bounds.minY(), bounds.minZ(), bounds.maxX(), bounds.maxY(), bounds.maxZ(), interval)) {
-                        continue;
-                    }
-
-                    double enter = interval.enter();
-                    double exit = interval.exit();
-
-                    Vec3 clippedStart = new Vec3(Math.fma(dx, enter, start.x), Math.fma(dy, enter, start.y), Math.fma(dz, enter, start.z));
-                    Vec3 clippedEnd = new Vec3(Math.fma(dx, exit, start.x), Math.fma(dy, exit, start.y), Math.fma(dz, exit, start.z));
-
-                    Pose3d pose = ship.pose();
-                    Vec3 localStart = pose.transformPositionInverse(clippedStart);
-                    Vec3 localEnd = pose.transformPositionInverse(clippedEnd);
-
-                    shipCoverage.computeIfAbsent(ship, ignored -> new Coverage()).include(localStart, localEnd);
-
-                    var scale = pose.scale();
-                    boolean scaled = scale.x() != 1.0 || scale.y() != 1.0 || scale.z() != 1.0;
-
-                    if (spans == null) {
-                        spans = new ArrayList<>();
-                        distance = start.distanceTo(receiver);
-                    }
-
-                    spans.add(new Span(localStart, localEnd, enter, exit, distance * (exit - enter), localStart.distanceTo(localEnd), scaled));
-                }
-
-                paths.add(spans == null ? List.of() : List.copyOf(spans));
             }
 
             captured.add(new CapturedPaths(receiver, List.copyOf(ships), List.copyOf(paths), input.emitters()));
