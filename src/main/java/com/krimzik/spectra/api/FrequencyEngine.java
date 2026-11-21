@@ -114,6 +114,7 @@ public final class FrequencyEngine {
     private int assemblingReceptionItems;
     private final ArrayDeque<ReceptionRequest> syncReception = new ArrayDeque<>();
     private final ArrayDeque<SharedReceptionBatch> activeReception = new ArrayDeque<>();
+    private int receptionWaitingRequests;
     private int submittedReceptionBatches;
     private int peakInFlightReceptionBatches;
     private int adaptiveSyncRequests;
@@ -417,6 +418,9 @@ public final class FrequencyEngine {
         private final Long ownerChunk;
         private final Entity ownerEntity;
         private boolean removed;
+        private ReceptionRequest activeReceptionRequest;
+        private ArrayDeque<ReceptionRequest> waitingReceptionRequests;
+        private boolean repeatedReception;
 
         private ReceiverRegistration(FrequencyReceiver receiver, Long ownerChunk, Entity ownerEntity) {
             this.receiver = receiver;
@@ -432,6 +436,14 @@ public final class FrequencyEngine {
 
             if (!stopped) {
                 checkWritable();
+
+                if (waitingReceptionRequests != null) {
+                    receptionWaitingRequests -= waitingReceptionRequests.size();
+                    waitingReceptionRequests.clear();
+                }
+
+                activeReceptionRequest = null;
+                repeatedReception = false;
 
                 unsubscribe();
                 receivers.remove(receiver);
@@ -1562,7 +1574,8 @@ public final class FrequencyEngine {
         }
 
         ReceiverRegistration registration = receivers.get(receiver);
-        if (registration == null || FrequencyMaterialConfig.workerThreads() == 0 || (!FrequencyMaterialAttenuation.enabled() && !FrequencyMaterialConfig.reflectionEnabled())) {
+
+        if (registration == null || (registration.activeReceptionRequest == null && (FrequencyMaterialConfig.workerThreads() == 0 || (!FrequencyMaterialAttenuation.enabled() && !FrequencyMaterialConfig.reflectionEnabled())))) {
             lastReceptionDecision = "synchronous";
             forEachReceivedInRange(receiver, rangeMeters, consumer);
             return;
@@ -1572,7 +1585,21 @@ public final class FrequencyEngine {
             throw new IllegalStateException("Spectra reception queue capacity exceeded");
         }
 
-        receptionQueue.addLast(new ReceptionRequest(receiver, registration, rangeMeters, consumer, 0));
+        ReceptionRequest request = new ReceptionRequest(receiver, registration, rangeMeters, consumer, 0);
+
+        if (registration.activeReceptionRequest == null) {
+            registration.activeReceptionRequest = request;
+            receptionQueue.addLast(request);
+        } else {
+            if (registration.waitingReceptionRequests == null) {
+                registration.waitingReceptionRequests = new ArrayDeque<>();
+            }
+
+            registration.waitingReceptionRequests.addLast(request);
+            registration.repeatedReception = true;
+            receptionWaitingRequests++;
+        }
+
         lastReceptionDecision = "queued_request";
     }
 
@@ -1860,7 +1887,7 @@ public final class FrequencyEngine {
     int pendingReceptionBatchCount() {
         checkRunning();
 
-        int count = receptionQueue.size() + stagedReception.size() + assemblingReception.size() + syncReception.size();
+        int count = receptionWaitingRequests + receptionQueue.size() + stagedReception.size() + assemblingReception.size() + syncReception.size();
         for (SharedReceptionBatch batch : activeReception) {
             count += batch.receivers.size() - batch.nextReceiver;
         }
@@ -1976,6 +2003,12 @@ public final class FrequencyEngine {
             return;
         }
 
+        for (ReceptionRequest request : receptionQueue) {
+            if (request.registration().repeatedReception) {
+                return;
+            }
+        }
+
         int count = receptionQueue.size();
         if (count > DIRECT_MAX_RECEIVERS || emitters.size() > MAX_GROUP_ITEMS || (long) count * emitters.size() > DIRECT_MAX_POTENTIAL_PAIRS) {
             return;
@@ -2053,8 +2086,14 @@ public final class FrequencyEngine {
 
             while (selected.size() < MAX_GROUP_RECEIVERS && System.nanoTime() < deadline && (!stagedReception.isEmpty() || !receptionQueue.isEmpty())) {
                 PreparedReception prepared = stagedReception.pollFirst();
+
                 if (prepared == null) {
-                    prepared = prepareReception(receptionQueue.removeFirst(), emitterFrame);
+                    ReceptionRequest request = receptionQueue.removeFirst();
+                    prepared = prepareReception(request, emitterFrame);
+
+                    if (prepared == null) {
+                        completeReceptionRequest(request);
+                    }
                 }
 
                 if (prepared == null) {
@@ -2063,6 +2102,7 @@ public final class FrequencyEngine {
 
                 int count = prepared.candidates().size();
                 if (count == 0) {
+                    completeReceptionRequest(prepared.request());
                     continue;
                 }
 
@@ -2089,7 +2129,7 @@ public final class FrequencyEngine {
                 return;
             }
 
-            if (total < MIN_PARALLEL_RECEPTION) {
+            if (total < MIN_PARALLEL_RECEPTION || FrequencyMaterialConfig.workerThreads() == 0) {
                 for (PreparedReception prepared : selected) {
                     syncReception.addLast(prepared.request());
                 }
@@ -2327,15 +2367,42 @@ public final class FrequencyEngine {
         }
     }
 
+    private void completeReceptionRequest(ReceptionRequest request) {
+        ReceiverRegistration registration = request.registration();
+        if (registration.activeReceptionRequest != request) {
+            return;
+        }
+
+        ArrayDeque<ReceptionRequest> waiting = registration.waitingReceptionRequests;
+        if (waiting == null || waiting.isEmpty()) {
+            registration.activeReceptionRequest = null;
+            registration.repeatedReception = false;
+            return;
+        }
+
+        ReceptionRequest next = waiting.removeFirst();
+        receptionWaitingRequests--;
+
+        registration.activeReceptionRequest = next;
+        receptionQueue.addLast(next);
+    }
+
     private void retryReception(ReceptionRequest request) {
-        if (receivers.get(request.receiver()) != request.registration()) {
+        ReceiverRegistration registration = request.registration();
+
+        if (receivers.get(request.receiver()) != registration) {
             return;
         }
 
         if (request.retries() >= MAX_RECEPTION_RETRIES) {
             syncReception.addLast(request);
         } else {
-            receptionQueue.addLast(new ReceptionRequest(request.receiver(), request.registration(), request.range(), request.consumer(), request.retries() + 1));
+            ReceptionRequest retried = new ReceptionRequest(request.receiver(), registration, request.range(), request.consumer(), request.retries() + 1);
+            if (registration.activeReceptionRequest == request) {
+                registration.activeReceptionRequest = retried;
+            }
+
+            receptionQueue.addLast(retried);
         }
     }
 
@@ -2439,6 +2506,7 @@ public final class FrequencyEngine {
                 ReceptionRequest request = prepared.request();
 
                 if (receivers.get(request.receiver()) != request.registration()) {
+                    completeReceptionRequest(request);
                     continue;
                 }
 
@@ -2490,6 +2558,7 @@ public final class FrequencyEngine {
                 } finally {
                     activeQueries--;
                     receptionDeliveryNanos += System.nanoTime() - deliveryStart;
+                    completeReceptionRequest(request);
                 }
             }
 
@@ -2498,16 +2567,19 @@ public final class FrequencyEngine {
                 ReceptionRequest request = syncReception.removeFirst();
 
                 if (receivers.get(request.receiver()) != request.registration()) {
+                    completeReceptionRequest(request);
                     continue;
                 }
 
                 long syncStart = System.nanoTime();
+
                 try {
                     forEachReceivedInRange(request.receiver(), request.range(), request.consumer());
                 } catch (RuntimeException exception) {
                     LOGGER.error("Deferred synchronous reception failed", exception);
                 } finally {
                     receptionSyncNanos += System.nanoTime() - syncStart;
+                    completeReceptionRequest(request);
                 }
             }
 
@@ -2606,6 +2678,17 @@ public final class FrequencyEngine {
         pathAttenuation.clearCachedPaths();
         interferenceWorkspaces.clear();
         emitters.clear();
+        for (ReceiverRegistration registration : receivers.values()) {
+            registration.activeReceptionRequest = null;
+
+            if (registration.waitingReceptionRequests != null) {
+                registration.waitingReceptionRequests.clear();
+            }
+
+            registration.repeatedReception = false;
+        }
+
+        receptionWaitingRequests = 0;
         receivers.clear();
         subscribedReceiverCount = 0;
         receiverSubscriptionIndex.clear();

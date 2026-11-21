@@ -657,4 +657,42 @@ class FrequencyEngineParallelReceptionTest extends FrequencyEngineFixture {
         assertEquals(1024, callbacks.get());
         assertEquals(0, staleResults.get());
     }
+
+    @Test
+    void sameReceiverRetriesBeforeNewerReception() throws Exception {
+        requireWorkers();
+        registerEmitters(1023);
+
+        TestEmitter changed = new TestEmitter(440.0);
+        engine.register(changed);
+
+        TestReceiver receiver = new TestReceiver(440.0, 0.0);
+        engine.registerReceiver(receiver);
+
+        Thread serverThread = Thread.currentThread();
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicInteger orderViolations = new AtomicInteger();
+
+        for (int i = 0; i < 2; i++) {
+            int requestIndex = i;
+
+            engine.scheduleReceptionInRange(receiver, 1.0,
+                    (emitter, signal, distance, amplitude, travelTime) -> {
+                        if (Thread.currentThread() != serverThread || callbacks.get() / 1023 != requestIndex || emitter == changed) {
+                            orderViolations.incrementAndGet();
+                        }
+
+                        callbacks.incrementAndGet();
+                    });
+        }
+
+        assertEquals(2, engine.pendingReceptionBatchCount());
+        submitFirstWorkerBatch();
+        changed.emitting = false;
+        drain();
+
+        assertEquals(2046, callbacks.get());
+        assertEquals(0, orderViolations.get());
+        assertEquals(0, engine.pendingReceptionBatchCount());
+    }
 }
